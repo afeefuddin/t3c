@@ -4,61 +4,66 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { InboundMessage } from "./gateway.ts";
 
-export type TaskStatus = "launching" | "launched" | "failed";
-
-export type InboxStatus = "pending" | "processing" | "done" | "failed";
-
-export interface InboxRecord {
-  id: string;
-  message: InboundMessage;
-  status: InboxStatus;
-  taskId: string | null;
-  error: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** A T3 thread whose answer still has to be posted back to its conversation. */
-export interface Relay {
-  threadId: string;
-  source: string;
-  conversationId: string;
-  /** Send time of the newest message awaiting an answer; earlier runs' answers are stale. */
-  since: string;
-}
-
-export interface TaskRecord {
+/** One Slack thread / GitHub issue / HTTP conversation: its messages, T3 threads and memory. */
+export interface Conversation {
   id: string;
   source: string;
   externalId: string;
+  state: ConversationState;
+  /** The agent's running notes about this conversation. */
+  summary: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export type ConversationState = "active" | "waiting_on_user" | "done";
+
+export interface StoredMessage {
+  id: string;
+  conversationId: string;
+  direction: "in" | "out";
+  author: string;
+  text: string;
+  /** For incoming messages: the full gateway message. */
+  inbound: InboundMessage | null;
+  /** Incoming: pending → processing → done | failed. Outgoing: sent. */
+  status: "pending" | "processing" | "done" | "failed" | "sent";
+  error: string | null;
+  createdAt: string;
+}
+
+/** A T3 thread attached to a conversation. A conversation can have several (e.g. one per project). */
+export interface ThreadRecord {
+  id: string;
+  conversationId: string;
+  /** Unique within the conversation, e.g. "main" or "web-app". */
+  label: string;
   projectId: string;
   title: string;
-  threadId: string | null;
-  status: TaskStatus;
+  t3ThreadId: string | null;
+  status: "launching" | "launched" | "failed";
   error: string | null;
+  /** Send time of the newest message to this thread still owed an answer; null when nothing is owed. */
+  awaitingSince: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-interface Row {
+export interface AgentRun {
   id: string;
-  source: string;
-  external_id: string;
-  project_id: string;
-  title: string;
-  thread_id: string | null;
-  status: TaskStatus;
+  conversationId: string;
+  trigger: string;
+  status: "running" | "done" | "failed";
+  /** Tool calls made during the run, in order. */
+  actions: { tool: string; input: unknown; result?: unknown; error?: string }[];
+  outcome: string | null;
   error: string | null;
-  created_at: string;
-  updated_at: string;
+  startedAt: string;
+  finishedAt: string | null;
 }
 
-/**
- * Durable state:
- * - inbox: verified incoming messages, saved before the webhook is answered so none are lost
- * - tasks: maps (source, externalId) to the T3 thread doing the work
- * - relays: answers still owed to a conversation, resumed after a restart
- */
+const now = () => new Date().toISOString();
+
+/** Durable state in SQLite. Incoming messages are saved before webhooks are answered, so none are lost. */
 export class Store {
   private readonly db: DatabaseSync;
 
@@ -67,184 +72,291 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
-      CREATE TABLE IF NOT EXISTS tasks (
+      CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
         source TEXT NOT NULL,
         external_id TEXT NOT NULL,
-        project_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        thread_id TEXT,
-        status TEXT NOT NULL,
-        error TEXT,
+        state TEXT NOT NULL DEFAULT 'active',
+        summary TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (source, external_id)
       );
-      CREATE TABLE IF NOT EXISTS inbox (
+      CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations (id),
         source TEXT NOT NULL,
-        event_key TEXT NOT NULL,
-        message TEXT NOT NULL,
+        event_key TEXT,
+        direction TEXT NOT NULL,
+        author TEXT NOT NULL,
+        text TEXT NOT NULL,
+        inbound TEXT,
         status TEXT NOT NULL,
-        task_id TEXT,
         error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (source, event_key)
       );
-      CREATE TABLE IF NOT EXISTS relays (
-        thread_id TEXT PRIMARY KEY,
-        source TEXT NOT NULL,
-        conversation_id TEXT NOT NULL,
-        since TEXT NOT NULL
+      CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation_id, created_at);
+      CREATE TABLE IF NOT EXISTS threads (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations (id),
+        label TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        t3_thread_id TEXT,
+        status TEXT NOT NULL,
+        error TEXT,
+        awaiting_since TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (conversation_id, label)
+      );
+      CREATE TABLE IF NOT EXISTS agent_runs (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations (id),
+        trigger TEXT NOT NULL,
+        status TEXT NOT NULL,
+        actions TEXT NOT NULL DEFAULT '[]',
+        outcome TEXT,
+        error TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT
       );
     `);
   }
 
-  /** Saves a message for processing. Returns undefined when this delivery was already received. */
-  enqueue(message: InboundMessage): InboxRecord | undefined {
-    const now = new Date().toISOString();
+  // ── conversations ──────────────────────────────────────────────────────────
+
+  getConversation(id: string): Conversation | undefined {
+    return toConversation(this.db.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as Row);
+  }
+
+  findConversation(source: string, externalId: string): Conversation | undefined {
+    const row = this.db.prepare("SELECT * FROM conversations WHERE source = ? AND external_id = ?").get(source, externalId);
+    return toConversation(row as Row);
+  }
+
+  updateConversation(id: string, changes: { state?: ConversationState; summary?: string }) {
+    const current = this.getConversation(id);
+    if (!current) return;
+    this.db
+      .prepare("UPDATE conversations SET state = ?, summary = ?, updated_at = ? WHERE id = ?")
+      .run(changes.state ?? current.state, changes.summary ?? current.summary, now(), id);
+  }
+
+  // ── messages ───────────────────────────────────────────────────────────────
+
+  /** Saves an incoming message in its conversation. Returns undefined when this delivery was already received. */
+  enqueue(message: InboundMessage): StoredMessage | undefined {
+    const time = now();
+    const conversation = this.db
+      .prepare(
+        `INSERT INTO conversations (id, source, external_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (source, external_id) DO UPDATE SET updated_at = excluded.updated_at
+         RETURNING id`,
+      )
+      .get(randomUUID(), message.source, message.conversationId, time, time) as { id: string };
     const row = this.db
       .prepare(
-        `INSERT INTO inbox (id, source, event_key, message, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'pending', ?, ?)
+        `INSERT INTO messages (id, conversation_id, source, event_key, direction, author, text, inbound, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'in', ?, ?, ?, 'pending', ?, ?)
          ON CONFLICT (source, event_key) DO NOTHING
          RETURNING *`,
       )
-      .get(randomUUID(), message.source, message.eventKey, JSON.stringify(message), now, now) as InboxRow | undefined;
-    return row && toInboxRecord(row);
+      .get(randomUUID(), conversation.id, message.source, message.eventKey, message.user, message.text, JSON.stringify(message), time, time);
+    return toMessage(row as Row);
   }
 
-  getInbox(id: string): InboxRecord | undefined {
-    const row = this.db.prepare("SELECT * FROM inbox WHERE id = ?").get(id) as InboxRow | undefined;
-    return row && toInboxRecord(row);
-  }
-
-  /** Takes the oldest pending message, marking it processing. */
-  nextInbox(): InboxRecord | undefined {
+  /** Records something t3c said in a conversation. */
+  addOutbound(conversationId: string, author: string, text: string): StoredMessage {
+    const conversation = this.getConversation(conversationId)!;
+    const time = now();
     const row = this.db
       .prepare(
-        `UPDATE inbox SET status = 'processing', updated_at = ?
-         WHERE id = (SELECT id FROM inbox WHERE status = 'pending' ORDER BY created_at, rowid LIMIT 1)
-         RETURNING *`,
+        `INSERT INTO messages (id, conversation_id, source, direction, author, text, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'out', ?, ?, 'sent', ?, ?) RETURNING *`,
       )
-      .get(new Date().toISOString()) as InboxRow | undefined;
-    return row && toInboxRecord(row);
+      .get(randomUUID(), conversationId, conversation.source, author, text, time, time);
+    return toMessage(row as Row)!;
   }
 
-  finishInbox(id: string, result: { taskId?: string; error?: string }) {
+  getMessage(id: string): StoredMessage | undefined {
+    return toMessage(this.db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as Row);
+  }
+
+  /** The most recent messages of a conversation, oldest first. */
+  messages(conversationId: string, limit = 30): StoredMessage[] {
+    const rows = this.db
+      .prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
+      .all(conversationId, limit) as Row[];
+    return rows.reverse().map((r) => toMessage(r)!);
+  }
+
+  /** Takes the oldest pending incoming message, marking it processing. */
+  nextPending(): StoredMessage | undefined {
+    const row = this.db
+      .prepare(
+        `UPDATE messages SET status = 'processing', updated_at = ?
+         WHERE id = (SELECT id FROM messages WHERE status = 'pending' ORDER BY created_at, rowid LIMIT 1)
+         RETURNING *`,
+      )
+      .get(now());
+    return toMessage(row as Row);
+  }
+
+  finishMessage(id: string, error?: string) {
     this.db
-      .prepare("UPDATE inbox SET status = ?, task_id = ?, error = ?, updated_at = ? WHERE id = ?")
-      .run(result.error ? "failed" : "done", result.taskId ?? null, result.error ?? null, new Date().toISOString(), id);
+      .prepare("UPDATE messages SET status = ?, error = ?, updated_at = ? WHERE id = ?")
+      .run(error ? "failed" : "done", error ?? null, now(), id);
   }
 
   /** After a crash, messages left mid-processing go back to pending. */
   requeueInterrupted() {
-    this.db.prepare("UPDATE inbox SET status = 'pending' WHERE status = 'processing'").run();
+    this.db.prepare("UPDATE messages SET status = 'pending' WHERE status = 'processing'").run();
   }
 
-  addRelay(relay: Relay) {
-    this.db
-      .prepare(
-        `INSERT INTO relays (thread_id, source, conversation_id, since) VALUES (?, ?, ?, ?)
-         ON CONFLICT (thread_id) DO UPDATE SET since = excluded.since`,
-      )
-      .run(relay.threadId, relay.source, relay.conversationId, relay.since);
+  // ── threads ────────────────────────────────────────────────────────────────
+
+  threads(conversationId: string): ThreadRecord[] {
+    const rows = this.db.prepare("SELECT * FROM threads WHERE conversation_id = ? ORDER BY created_at, rowid").all(conversationId);
+    return (rows as Row[]).map((r) => toThread(r)!);
   }
 
-  relays(): Relay[] {
-    const rows = this.db.prepare("SELECT * FROM relays ORDER BY since").all() as {
-      thread_id: string;
-      source: string;
-      conversation_id: string;
-      since: string;
-    }[];
-    return rows.map((r) => ({ threadId: r.thread_id, source: r.source, conversationId: r.conversation_id, since: r.since }));
+  getThread(id: string): ThreadRecord | undefined {
+    return toThread(this.db.prepare("SELECT * FROM threads WHERE id = ?").get(id) as Row);
   }
 
-  removeRelay(threadId: string) {
-    this.db.prepare("DELETE FROM relays WHERE thread_id = ?").run(threadId);
-  }
-
-  get(id: string): TaskRecord | undefined {
-    return toRecord(this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined);
-  }
-
-  find(source: string, externalId: string): TaskRecord | undefined {
-    const row = this.db
-      .prepare("SELECT * FROM tasks WHERE source = ? AND external_id = ?")
-      .get(source, externalId) as Row | undefined;
-    return toRecord(row);
+  findThread(conversationId: string, label: string): ThreadRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM threads WHERE conversation_id = ? AND label = ?").get(conversationId, label);
+    return toThread(row as Row);
   }
 
   /**
-   * Claims the (source, externalId) key for a launch. Returns undefined when another
-   * launch already holds it, so two concurrent deliveries can't spawn two threads.
-   * A failed task may be claimed again.
+   * Claims (conversation, label) for a launch. Returns undefined when another launch holds it,
+   * so two concurrent deliveries can't spawn two threads. A failed thread may be claimed again.
    */
-  claim(input: { source: string; externalId: string; projectId: string; title: string }): TaskRecord | undefined {
-    const now = new Date().toISOString();
+  claimThread(input: { conversationId: string; label: string; projectId: string; title: string }): ThreadRecord | undefined {
+    const time = now();
     const row = this.db
       .prepare(
-        `INSERT INTO tasks (id, source, external_id, project_id, title, status, created_at, updated_at)
+        `INSERT INTO threads (id, conversation_id, label, project_id, title, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, 'launching', ?, ?)
-         ON CONFLICT (source, external_id) DO UPDATE SET
+         ON CONFLICT (conversation_id, label) DO UPDATE SET
            project_id = excluded.project_id, title = excluded.title,
            status = 'launching', error = NULL, updated_at = excluded.updated_at
-         WHERE tasks.status = 'failed'
+         WHERE threads.status = 'failed'
          RETURNING *`,
       )
-      .get(randomUUID(), input.source, input.externalId, input.projectId, input.title, now, now) as Row | undefined;
-    return toRecord(row);
+      .get(randomUUID(), input.conversationId, input.label, input.projectId, input.title, time, time);
+    return toThread(row as Row);
   }
 
-  markLaunched(id: string, threadId: string) {
+  markThreadLaunched(id: string, t3ThreadId: string) {
     this.db
-      .prepare("UPDATE tasks SET status = 'launched', thread_id = ?, error = NULL, updated_at = ? WHERE id = ?")
-      .run(threadId, new Date().toISOString(), id);
+      .prepare("UPDATE threads SET status = 'launched', t3_thread_id = ?, error = NULL, updated_at = ? WHERE id = ?")
+      .run(t3ThreadId, now(), id);
   }
 
-  markFailed(id: string, error: string) {
+  markThreadFailed(id: string, error: string) {
+    this.db.prepare("UPDATE threads SET status = 'failed', error = ?, updated_at = ? WHERE id = ?").run(error, now(), id);
+  }
+
+  /** Marks that a message was just sent to the thread and its answer is owed to the conversation. */
+  setAwaiting(id: string, since: string) {
+    this.db.prepare("UPDATE threads SET awaiting_since = ?, updated_at = ? WHERE id = ?").run(since, now(), id);
+  }
+
+  /** Clears the owed answer unless a newer message arrived meanwhile. Returns whether it cleared. */
+  clearAwaiting(id: string, since: string): boolean {
+    const result = this.db.prepare("UPDATE threads SET awaiting_since = NULL WHERE id = ? AND awaiting_since = ?").run(id, since);
+    return result.changes > 0;
+  }
+
+  awaitingThreads(): ThreadRecord[] {
+    const rows = this.db.prepare("SELECT * FROM threads WHERE awaiting_since IS NOT NULL AND t3_thread_id IS NOT NULL").all();
+    return (rows as Row[]).map((r) => toThread(r)!);
+  }
+
+  // ── agent runs ─────────────────────────────────────────────────────────────
+
+  startRun(conversationId: string, trigger: string): AgentRun {
+    const row = this.db
+      .prepare("INSERT INTO agent_runs (id, conversation_id, trigger, status, started_at) VALUES (?, ?, ?, 'running', ?) RETURNING *")
+      .get(randomUUID(), conversationId, trigger, now());
+    return toRun(row as Row)!;
+  }
+
+  finishRun(id: string, result: { actions: AgentRun["actions"]; outcome?: string; error?: string }) {
     this.db
-      .prepare("UPDATE tasks SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
-      .run(error, new Date().toISOString(), id);
+      .prepare("UPDATE agent_runs SET status = ?, actions = ?, outcome = ?, error = ?, finished_at = ? WHERE id = ?")
+      .run(result.error ? "failed" : "done", JSON.stringify(result.actions), result.outcome ?? null, result.error ?? null, now(), id);
+  }
+
+  runs(conversationId: string): AgentRun[] {
+    const rows = this.db.prepare("SELECT * FROM agent_runs WHERE conversation_id = ? ORDER BY started_at, rowid").all(conversationId);
+    return (rows as Row[]).map((r) => toRun(r)!);
   }
 }
 
-interface InboxRow {
-  id: string;
-  message: string;
-  status: InboxStatus;
-  task_id: string | null;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
-}
+type Row = Record<string, any> | undefined;
 
-function toInboxRecord(row: InboxRow): InboxRecord {
-  return {
-    id: row.id,
-    message: JSON.parse(row.message),
-    status: row.status,
-    taskId: row.task_id,
-    error: row.error,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function toRecord(row: Row | undefined): TaskRecord | undefined {
+function toConversation(row: Row): Conversation | undefined {
   if (!row) return undefined;
   return {
     id: row.id,
     source: row.source,
     externalId: row.external_id,
-    projectId: row.project_id,
-    title: row.title,
-    threadId: row.thread_id,
+    state: row.state,
+    summary: row.summary,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toMessage(row: Row): StoredMessage | undefined {
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    direction: row.direction,
+    author: row.author,
+    text: row.text,
+    inbound: row.inbound ? JSON.parse(row.inbound) : null,
     status: row.status,
     error: row.error,
     createdAt: row.created_at,
+  };
+}
+
+function toThread(row: Row): ThreadRecord | undefined {
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    label: row.label,
+    projectId: row.project_id,
+    title: row.title,
+    t3ThreadId: row.t3_thread_id,
+    status: row.status,
+    error: row.error,
+    awaitingSince: row.awaiting_since,
+    createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toRun(row: Row): AgentRun | undefined {
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    trigger: row.trigger,
+    status: row.status,
+    actions: JSON.parse(row.actions),
+    outcome: row.outcome,
+    error: row.error,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
   };
 }

@@ -26,7 +26,7 @@ export function httpGateway(secret: string): Gateway {
           user: "http",
           text: requireString(input, "prompt"),
           title: requireString(input, "title"),
-          project: requireString(input, "project"),
+          projects: [requireString(input, "project")],
           meta: worktree ? { worktree: JSON.stringify(worktree) } : undefined,
         },
       };

@@ -86,7 +86,7 @@ export class GithubGateway implements Gateway {
       user: `@${login}`,
       text,
       title: `${repo}#${issue.number} ${issue.title}`,
-      project,
+      projects: [project],
       url: comment.html_url,
       meta: {
         repo,

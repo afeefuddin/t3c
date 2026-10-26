@@ -1,15 +1,23 @@
-import type { LaunchInput, T3, ThreadReply, ThreadSummary } from "../src/t3.ts";
+import type { LaunchInput, Project, T3, ThreadReply, ThreadSummary } from "../src/t3.ts";
 
+/** In-memory T3: records launches and sends; answers immediately unless `gate` holds them. */
 export class FakeT3 implements T3 {
+  projects: Project[] = [
+    { id: "p1", title: "Demo", workspaceRoot: "/tmp/demo" },
+    { id: "p2", title: "Web", workspaceRoot: "/tmp/web" },
+  ];
   launches: LaunchInput[] = [];
   sends: { threadId: string; message: string }[] = [];
   threads: ThreadSummary[] = [];
+  waits: { threadId: string; since: string }[] = [];
   /** When set, launch creates the thread but then throws (lost response). */
   loseLaunchResponse = false;
   failLaunch = false;
+  /** Lets a test hold answers back until it resolves this. */
+  gate: Promise<void> = Promise.resolve();
 
   async listProjects() {
-    return [{ id: "p1", title: "Demo", workspaceRoot: "/tmp/demo" }];
+    return this.projects;
   }
   async listThreads(_projectId: string, titleContains: string) {
     return this.threads.filter((t) => t.title.includes(titleContains));
@@ -17,12 +25,7 @@ export class FakeT3 implements T3 {
   async launchThread(input: LaunchInput) {
     if (this.failLaunch) throw new Error("boom");
     this.launches.push(input);
-    const thread = {
-      threadId: `t${this.launches.length}`,
-      title: input.title,
-      status: "running",
-      createdAt: new Date().toISOString(),
-    };
+    const thread = { threadId: `t${this.launches.length}`, title: input.title, status: "running", createdAt: new Date().toISOString() };
     this.threads.push(thread);
     if (this.loseLaunchResponse) throw new Error("socket hang up");
     return { threadId: thread.threadId };
@@ -33,12 +36,12 @@ export class FakeT3 implements T3 {
   async readThread() {
     return {};
   }
-  waits: { threadId: string; since: string }[] = [];
-  /** Lets a test hold replies back until it calls `release`. */
-  gate: Promise<void> = Promise.resolve();
   async waitForReply(threadId: string, since: string): Promise<ThreadReply> {
     this.waits.push({ threadId, since });
     await this.gate;
     return { status: "completed", text: `**Done** in ${threadId}` };
+  }
+  async latestReply(threadId: string): Promise<ThreadReply> {
+    return { status: "running", text: `progress in ${threadId}` };
   }
 }

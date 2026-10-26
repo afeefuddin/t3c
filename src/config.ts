@@ -12,8 +12,8 @@ export interface Config {
   slack?: {
     signingSecret: string;
     botToken: string;
-    /** Slack channel id → T3 project. */
-    channels: Record<string, string>;
+    /** Slack channel id → the T3 project(s) it may use; "*" means any. */
+    channels: Record<string, string | string[]>;
     /** Slack user ids allowed to use the bot. */
     allowedUsers: string[];
   };
@@ -23,6 +23,12 @@ export interface Config {
     repos: Record<string, string>;
     /** GitHub logins allowed to use /t3c. */
     allowedUsers: string[];
+  };
+  /** AI layer that decides what to do with messages. Without it, fixed rules apply. */
+  agent?: {
+    provider: "codex";
+    /** Codex model; Codex's default when unset. */
+    model?: string;
   };
   http?: {
     /** Bearer secret for POST /hooks/http and GET /messages/:id. */
@@ -41,6 +47,8 @@ export const paths = {
   state: join(home, "state.sqlite"),
   pid: join(home, "t3c.pid"),
   log: join(home, "t3c.log"),
+  skills: join(home, "skills"),
+  agentWork: join(home, "agent"),
 };
 
 export function loadConfig(): Config {

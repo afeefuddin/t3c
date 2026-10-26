@@ -48,6 +48,44 @@ Config is stored in `~/.t3c/config.json` (readable only by you).
 - **GitHub:** `/t3c fix this` on an issue starts a thread on branch `t3c/issue-<n>`. On a pull
   request, the agent works on the PR's branch. Later `/t3c` comments are follow-ups.
 
+## AI agent (optional)
+
+```sh
+t3c agent codex      # Codex decides what to do with each message
+t3c agent off        # back to fixed rules
+```
+
+Without the agent, fixed rules apply:
+- **New conversation:** a thread starts in the channel's project. If a channel allows several
+  projects, start your message with `in:<project>`.
+- **Follow-ups** go to the latest thread.
+- **Answers** are posted back unchanged.
+
+With `t3c agent codex`, each event wakes Codex once, with tools scoped to that conversation.
+Events are a new message, or a T3 thread that finished.
+- **Starting work:** it reads the Slack thread or issue, picks the project, and writes a brief.
+- **Choosing threads:** it can start several threads (one per project) or ask which project
+  you mean.
+- **Answering:** status questions get a short reply without disturbing the thread. When a thread
+  finishes, it posts a short summary.
+
+Its behaviour comes from **skills**: Markdown files in `~/.t3c/skills`. Edit them, or add your own.
+
+Codex keeps your provider, model and login, but t3c's runs are locked down:
+- read-only sandbox
+- no shell or other built-in tools
+- none of your own MCP servers, hooks or memories
+
+Its only way to act is through t3c's tools, which allow only that conversation and its allowed
+projects, at most 3 replies and 3 threads per run. If Codex fails before doing anything, the fixed
+rules take over.
+
+Everything is stored in `~/.t3c/state.sqlite`:
+- every conversation, with its messages in both directions
+- the T3 threads attached to it
+- the agent's summary notes
+- each agent run, with its tool calls
+
 ## Safety
 
 t3c receives messages from the internet and turns them into agent work on your machine, so:

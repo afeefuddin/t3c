@@ -18,7 +18,7 @@ async function setup() {
     return {};
   };
   const gateway = new SlackGateway(
-    { signingSecret: SECRET, botToken: "xoxb", channels: { C1: "demo" }, allowedUsers: ["UALICE"] },
+    { signingSecret: SECRET, botToken: "xoxb", channels: { C1: "demo", C2: ["demo", "web"] }, allowedUsers: ["UALICE"] },
     { store, slack },
   );
   await gateway.init();
@@ -65,9 +65,14 @@ test("a mention becomes a message for the Slack thread", async () => {
     user: "<@UALICE>",
     text: "fix the login bug",
     title: "fix the login bug",
-    project: "demo",
+    projects: ["demo"],
     meta: { channel: "C1", ts: "100.1" },
   });
+});
+
+test("channels can allow several projects", async () => {
+  const { gateway } = await setup();
+  assert.deepEqual(gateway.receive(eventCallback({ channel: "C2" })).message?.projects, ["demo", "web"]);
 });
 
 test("plain replies count only in Slack threads that already have a T3 thread", async () => {
@@ -75,8 +80,7 @@ test("plain replies count only in Slack threads that already have a T3 thread", 
   const reply = { type: "message", ts: "100.2", thread_ts: "100.1", text: "also add a test" };
   assert.equal(gateway.receive(eventCallback(reply)).message, undefined);
 
-  store.claim({ source: "slack", externalId: "C1:100.1", projectId: "p1", title: "t" });
-  store.markLaunched(store.find("slack", "C1:100.1")!.id, "t1");
+  store.enqueue({ source: "slack", eventKey: "Ev0", conversationId: "C1:100.1", user: "u", text: "t", title: "t", projects: ["demo"] });
   assert.equal(gateway.receive(eventCallback(reply)).message?.conversationId, "C1:100.1");
 });
 

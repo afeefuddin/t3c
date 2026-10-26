@@ -1,8 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AgentToolServer } from "./agent/mcp.ts";
 import { type Gateway, GatewayError, header, safeEqual } from "./gateway.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Store } from "./store.ts";
-import type { T3 } from "./t3.ts";
 import type { Worker } from "./worker.ts";
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -11,19 +11,21 @@ export interface ServerDeps {
   gateways: Gateway[];
   worker: Worker;
   store: Store;
-  t3: T3;
   /** Bearer secret for GET /messages/<id>; the endpoint is disabled without one. */
   secret?: string;
+  /** Tools for running agents, at /agent/mcp (per-run bearer tokens). */
+  agentTools?: AgentToolServer;
 }
 
 /**
  * POST /hooks/<gateway>  → verify, save to the inbox, answer immediately
- * GET  /messages/<id>    → inbox record, its task and the thread's latest messages
+ * GET  /messages/<id>    → a message, its conversation, attached threads and agent runs
+ *      /agent/mcp         → tools for the agent run holding the bearer token
  * GET  /health
  *
- * Only /hooks/* is meant to be exposed publicly (see `t3c funnel`).
+ * Only /hooks/* is exposed publicly (Tailscale Funnel); the rest is reachable from this machine only.
  */
-export function createApp({ gateways, worker, store, t3, secret }: ServerDeps) {
+export function createApp({ gateways, worker, store, secret, agentTools }: ServerDeps) {
   const byName = new Map(gateways.map((g) => [g.name, g]));
 
   const server = createServer(async (req, res) => {
@@ -44,12 +46,13 @@ export function createApp({ gateways, worker, store, t3, secret }: ServerDeps) {
         if (!secret || !safeEqual(header(req.headers, "authorization"), `Bearer ${secret}`)) {
           return send(res, 401, { error: "Unauthorized." });
         }
-        const message = store.getInbox(name);
+        const message = store.getMessage(name);
         if (!message) return send(res, 404, { error: "Not found." });
-        const task = message.taskId ? store.get(message.taskId) : undefined;
-        const thread = task?.threadId ? await t3.readThread(task.threadId) : null;
-        return send(res, 200, { message, task, thread });
+        const conversation = store.getConversation(message.conversationId);
+        return send(res, 200, { message, conversation, threads: store.threads(message.conversationId), runs: store.runs(message.conversationId) });
       }
+
+      if (url.pathname === "/agent/mcp" && agentTools) return await agentTools.handle(req, res);
 
       if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
       send(res, 404, { error: "Not found." });

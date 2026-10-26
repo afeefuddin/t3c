@@ -39,6 +39,8 @@ export interface T3 {
   readThread(threadId: string): Promise<unknown>;
   /** Waits for a run that finished after `since` (ISO time) and returns its final answer. */
   waitForReply(threadId: string, since: string): Promise<ThreadReply>;
+  /** The thread's current status and its latest run's last answer, without waiting. */
+  latestReply(threadId: string): Promise<ThreadReply>;
 }
 
 export interface ThreadReply {
@@ -125,17 +127,7 @@ export class T3Client implements T3 {
       // its answer is a run that finished after it was sent. An earlier finish is a stale answer.
       const latest = recentRuns.find((r) => r.runId === thread.latestRunId);
       const answered = !WORKING.has(thread.status) && latest?.completedAt != null && latest.completedAt >= since;
-      if (answered) {
-        // Item positions are thread-wide, so the tail holds the latest run's messages.
-        const { items } = await this.call<ThreadState>("t3_thread_read", {
-          threadId,
-          afterPosition: Math.max(0, thread.itemCount - 50),
-          limit: 100,
-          maxCharsPerItem: 20_000,
-        });
-        const answer = items.findLast((i) => i.type === "assistant_message" && i.runId === thread.latestRunId);
-        return { status: thread.status, text: answer?.text ?? null };
-      }
+      if (answered) return { status: thread.status, text: await this.lastAnswer(threadId, thread) };
       if (Date.now() > deadline) return { status: "timed_out", text: null };
       if (WORKING.has(thread.status)) {
         await this.call("t3_thread_wait", { threadId, timeoutMs: WAIT_SLICE_MS });
@@ -144,6 +136,22 @@ export class T3Client implements T3 {
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
+  }
+
+  async latestReply(threadId: string): Promise<ThreadReply> {
+    const { thread } = await this.call<ThreadState>("t3_thread_read", { threadId, limit: 1, maxCharsPerItem: 1 });
+    return { status: thread.status, text: await this.lastAnswer(threadId, thread) };
+  }
+
+  private async lastAnswer(threadId: string, thread: ThreadState["thread"]): Promise<string | null> {
+    // Item positions are thread-wide, so the tail holds the latest run's messages.
+    const { items } = await this.call<ThreadState>("t3_thread_read", {
+      threadId,
+      afterPosition: Math.max(0, thread.itemCount - 50),
+      limit: 100,
+      maxCharsPerItem: 20_000,
+    });
+    return items.findLast((i) => i.type === "assistant_message" && i.runId === thread.latestRunId)?.text ?? null;
   }
 
   private async call<T = unknown>(name: string, args: Record<string, unknown>): Promise<T> {

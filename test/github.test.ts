@@ -65,7 +65,7 @@ test("a /t3c comment from an allowed owner becomes a message", () => {
   assert.equal(message?.conversationId, "afeef/app#7");
   assert.equal(message?.eventKey, "comment-2");
   assert.equal(message?.text, "fix it");
-  assert.equal(message?.project, "demo");
+  assert.deepEqual(message?.projects, ["demo"]);
   assert.equal(message?.title, "afeef/app#7 Login broken");
 });
 

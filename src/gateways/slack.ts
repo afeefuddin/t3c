@@ -88,7 +88,7 @@ export class SlackGateway implements Gateway {
     if (event.type === "message") {
       // A mention arrives as both app_mention and message; app_mention handles it.
       // Plain messages only matter as replies in a Slack thread that already has a T3 thread.
-      if (event.text.includes(mention) || !event.thread_ts || !this.store.find(this.name, conversationId)) return;
+      if (event.text.includes(mention) || !event.thread_ts || !this.store.findConversation(this.name, conversationId)) return;
     }
 
     const notice = (text: string): undefined => {
@@ -98,8 +98,8 @@ export class SlackGateway implements Gateway {
       log(this.name, `ignored ${event.user} in ${event.channel}: not on the allowlist`, "warn");
       return notice(`<@${event.user}> isn't allowed to use t3c.`);
     }
-    const project = this.config.channels[event.channel];
-    if (!project) return notice("This channel isn't connected to a T3 project. Run `t3c add slack` to connect it.");
+    const projects = this.config.channels[event.channel];
+    if (!projects) return notice("This channel isn't connected to a T3 project. Run `t3c add slack` to connect it.");
     const text = event.text.replaceAll(mention, "").trim();
     if (!text) return notice("What should I work on?");
 
@@ -110,7 +110,7 @@ export class SlackGateway implements Gateway {
       user: `<@${event.user}>`,
       text,
       title: firstLine(text),
-      project,
+      projects: [projects].flat(),
       meta: { channel: event.channel, ts: event.ts, ...(event.thread_ts ? { threadTs: event.thread_ts } : {}) },
     };
   }

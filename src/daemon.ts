@@ -83,7 +83,7 @@ export async function status() {
   else say.warn("not running — `t3c start`");
   if (isLoggedIn(paths.auth)) say.ok(`connected to T3 Code at ${t3McpUrl()}`);
   else say.warn("not connected to T3 Code — `t3c login`");
-  say.info(`threads run as ${config.runtimeMode}`);
+  say.info(`threads run as ${config.runtimeMode}; brain: ${config.agent ? `${config.agent.provider} (skills in ${paths.skills})` : "fixed rules"}`);
 
   say.step("Gateways");
   for (const line of describeGateways(config)) say.info(line);
@@ -104,7 +104,7 @@ export function logs(follow: boolean) {
 export function describeGateways(config: Config): string[] {
   const lines: string[] = [];
   if (config.slack) {
-    const channels = Object.entries(config.slack.channels).map(([c, p]) => `${c}→${p}`);
+    const channels = Object.entries(config.slack.channels).map(([c, p]) => `${c}→${[p].flat().join("|")}`);
     lines.push(`slack   ${channels.join(", ") || "no channels"}; ${config.slack.allowedUsers.length} allowed user(s)`);
   }
   if (config.github) {

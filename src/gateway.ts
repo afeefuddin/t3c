@@ -22,8 +22,8 @@ export interface InboundMessage {
   text: string;
   /** Title for a new T3 thread. */
   title: string;
-  /** T3 project id or title. */
-  project: string;
+  /** T3 projects (ids or titles) this conversation may work in; ["*"] means any. */
+  projects: string[];
   /** Link back to the conversation, for the agent and for humans. */
   url?: string;
   /** Gateway-specific details needed later, e.g. the Slack message ts to react to. */

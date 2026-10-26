@@ -81,11 +81,14 @@ export async function addSlack() {
     "Which channel?",
     channels.map((c) => ({ label: `#${c.name}`, value: c })),
   );
-  const project = await chooseProject(`Which T3 project should #${channel.name} work on?`);
-  slack.channels[channel.id] = project;
+  const projects = await chooseProjects(`Which T3 projects may #${channel.name} work on?`);
+  slack.channels[channel.id] = projects.length === 1 ? projects[0] : projects;
   saveConfig({ ...loadConfig(), slack });
 
-  say.ok(`#${channel.name} → ${project}`);
+  say.ok(`#${channel.name} → ${projects.join(", ")}`);
+  if (projects.length > 1 || projects[0] === "*") {
+    say.hint(loadConfig().agent ? "Codex picks the project per request." : "Messages pick one with `in:<project>`, or turn on `t3c agent codex` to let Codex pick.");
+  }
   finish(`Mention @t3bot in #${channel.name} to start a T3 thread. Run \`t3c add slack\` again to add more channels.`);
   say.hint("First time? After `t3c start`, open the app's Event Subscriptions page and click Retry so Slack verifies the URL.");
 }
@@ -166,8 +169,34 @@ async function removeWebhook(repo: string) {
   }
 }
 
+/** One or more projects (numbers or names, comma-separated), or * for any. */
+async function chooseProjects(label: string): Promise<string[]> {
+  const projects = await listProjectsQuietly();
+  if (projects.length > 0) {
+    say.info(label);
+    projects.forEach((p, i) => say.info(`  ${i + 1}. ${p.title}`));
+    say.info("  *. any project");
+  }
+  const answer = await ask(projects.length > 0 ? "Numbers, comma-separated (or *)" : `${label} Project names, comma-separated (or *)`, {
+    validate: (v) =>
+      split(v).every((x) => x === "*" || !projects.length || projects[Number(x) - 1]) ? undefined : `Pick from 1–${projects.length} or *.`,
+  });
+  const picks = split(answer);
+  if (picks.includes("*")) return ["*"];
+  return picks.map((x) => (projects.length ? projects[Number(x) - 1].title : x));
+}
+
 /** Lists T3 projects when t3c is logged in; otherwise asks for a name. */
 async function chooseProject(label: string): Promise<string> {
+  const projects = await listProjectsQuietly();
+  if (projects.length === 0) return ask(`${label} Project name`);
+  return choose(
+    label,
+    projects.map((p) => ({ label: p.title, value: p.title })),
+  );
+}
+
+async function listProjectsQuietly(): Promise<{ id: string; title: string }[]> {
   let projects: { id: string; title: string }[] = [];
   try {
     const t3 = await T3Client.connect(t3McpUrl(), paths.auth);
@@ -176,11 +205,7 @@ async function chooseProject(label: string): Promise<string> {
   } catch (error) {
     say.hint(`Couldn't list T3 projects (${errorMessage(error)}).`);
   }
-  if (projects.length === 0) return ask(`${label} Project name`);
-  return choose(
-    label,
-    projects.map((p) => ({ label: p.title, value: p.title })),
-  );
+  return projects;
 }
 
 async function publicUrl() {

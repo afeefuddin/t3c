@@ -1,9 +1,13 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
+import { CodexBrain } from "./agent/codex.ts";
+import { AgentToolServer } from "./agent/mcp.ts";
+import { ensureSkills } from "./agent/skills.ts";
 import { isLoggedIn, login } from "./auth.ts";
-import { loadConfig, paths, t3McpUrl } from "./config.ts";
+import { loadConfig, paths, saveConfig, t3McpUrl } from "./config.ts";
+import { type Brain, SimpleBrain } from "./brain.ts";
 import { describeGateways, logs, runningPid, start, status, stop } from "./daemon.ts";
 import { Dispatcher } from "./dispatch.ts";
 import type { Gateway } from "./gateway.ts";
@@ -26,6 +30,8 @@ ${color("bold", "Set up")} (once, in this order)
   t3c add github <owner/repo>    let /t3c comments in a repo start work
   t3c add http                   an authenticated webhook for scripts
   t3c remove slack [channel-id] | github <owner/repo> | http
+  t3c agent codex [--model <m>]  let Codex decide (project, briefs, follow-ups)
+  t3c agent off                  back to fixed rules
 
 ${color("bold", "Run")}
   t3c start | stop | restart     the background service
@@ -44,6 +50,7 @@ const { positionals, values } = parseArgs({
   options: {
     project: { type: "string" },
     title: { type: "string" },
+    model: { type: "string" },
     follow: { type: "boolean", short: "f" },
     help: { type: "boolean", short: "h" },
   },
@@ -69,6 +76,10 @@ try {
       else if (rest[0] === "github") await addGithub(rest[1] ?? "");
       else if (rest[0] === "http") addHttp();
       else throw new Error("Usage: t3c add slack | github <owner/repo> | http");
+      break;
+
+    case "agent":
+      await agent(rest[0]);
       break;
 
     case "remove":
@@ -111,14 +122,26 @@ try {
       const prompt = rest.join(" ");
       if (!prompt || !values.project) throw new Error('Usage: t3c run "<prompt>" --project <project>');
       const t3 = await T3Client.connect(t3McpUrl(), paths.auth);
-      const result = await new Dispatcher(t3, new Store(paths.state), loadConfig().runtimeMode).dispatch({
+      const store = new Store(paths.state);
+      const title = values.title ?? prompt.slice(0, 60);
+      const message = store.enqueue({
         source: "cli",
-        externalId: randomUUID(),
+        eventKey: randomUUID(),
+        conversationId: randomUUID(),
+        user: "cli",
+        text: prompt,
+        title,
+        projects: [values.project],
+      })!;
+      const conversation = store.getConversation(message.conversationId)!;
+      const result = await new Dispatcher(t3, store, loadConfig().runtimeMode).launch(conversation, {
+        label: "main",
         project: values.project,
-        title: values.title ?? prompt.slice(0, 60),
+        title,
         prompt,
       });
-      say.ok(`Started T3 thread ${result.task.threadId}.`);
+      store.finishMessage(message.id);
+      say.ok(`Started T3 thread ${result.thread.t3ThreadId}.`);
       await t3.close();
       break;
     }
@@ -152,13 +175,25 @@ async function serve() {
     log("t3c", "runtimeMode is full-access: chat messages can run any command on this machine", "warn");
   }
   const t3 = await T3Client.connect(t3McpUrl(), paths.auth);
-  const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store, config.runtimeMode), store, t3 });
+  const agentTools = new AgentToolServer();
+  const simple = new SimpleBrain();
+  const brain: Brain = config.agent
+    ? new CodexBrain({
+        toolServer: agentTools,
+        toolsUrl: `http://127.0.0.1:${config.port}/agent/mcp`,
+        skillsDir: paths.skills,
+        workDir: paths.agentWork,
+        model: config.agent.model,
+        fallback: simple,
+      })
+    : simple;
+  const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store, config.runtimeMode), store, t3, brain });
   worker.start();
 
   // Never bind publicly: the internet reaches t3c only through Tailscale Funnel, and only /hooks.
-  const server = createApp({ gateways, worker, store, t3, secret: config.http?.secret });
+  const server = createApp({ gateways, worker, store, secret: config.http?.secret, agentTools });
   server.listen(config.port, "127.0.0.1", () => {
-    log("t3c", `listening on 127.0.0.1:${config.port}; threads run as ${config.runtimeMode}`, "ok");
+    log("t3c", `listening on 127.0.0.1:${config.port}; threads run as ${config.runtimeMode}; brain: ${brain.name}`, "ok");
     for (const line of describeGateways(config)) log("t3c", line);
   });
   server.on("error", (error) => {
@@ -176,3 +211,28 @@ async function serve() {
   if (runningPid() !== process.pid) log("t3c", "running in the foreground; Ctrl-C to stop");
 }
 
+
+/** `t3c agent codex|off`: switches the brain. */
+async function agent(provider: string | undefined) {
+  const config = loadConfig();
+  if (provider === "off") {
+    delete config.agent;
+    saveConfig(config);
+    say.ok("Agent off: messages follow the fixed rules (channel project, follow-ups to the latest thread).");
+  } else if (provider === "codex") {
+    try {
+      execFileSync("codex", ["login", "status"], { stdio: "ignore" });
+    } catch {
+      throw new Error("Codex isn't installed or logged in. Install it and run `codex login`.");
+    }
+    config.agent = { provider: "codex", ...(values.model ? { model: values.model } : {}) };
+    saveConfig(config);
+    ensureSkills(paths.skills);
+    say.ok(`Codex now decides what to do with messages${values.model ? ` (model ${values.model})` : ""}.`);
+    say.info(`Skills: ${paths.skills} — edit them or add your own .md files.`);
+    say.hint("If Codex fails, t3c falls back to the fixed rules. Apply with `t3c restart`.");
+  } else {
+    say.info(config.agent ? `Agent: ${config.agent.provider}${config.agent.model ? ` (${config.agent.model})` : ""}` : "Agent: off (fixed rules)");
+    say.hint("t3c agent codex [--model <m>] | t3c agent off");
+  }
+}

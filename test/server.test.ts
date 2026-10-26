@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { after, test } from "node:test";
+import { SimpleBrain } from "../src/brain.ts";
 import { Dispatcher } from "../src/dispatch.ts";
 import { type Gateway, GatewayError } from "../src/gateway.ts";
 import { httpGateway } from "../src/gateways/http.ts";
@@ -26,8 +27,8 @@ const strict: Gateway = {
 const t3 = new FakeT3();
 const store = new Store(":memory:");
 const gateways = [httpGateway(SECRET), exploding, strict];
-const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store), store, t3 });
-const server = createApp({ gateways, worker, store, t3, secret: SECRET }).listen(0, "127.0.0.1");
+const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store), store, t3, brain: new SimpleBrain() });
+const server = createApp({ gateways, worker, store, secret: SECRET }).listen(0, "127.0.0.1");
 await new Promise((r) => server.once("listening", r));
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 after(() => server.close());
@@ -49,7 +50,9 @@ test("the http gateway enqueues work and its status is readable with the secret"
   const status = await fetch(`${base}/messages/${messageId}`, { headers: { authorization: `Bearer ${SECRET}` } });
   const body = await status.json();
   assert.equal(body.message.status, "done");
-  assert.equal(body.task.threadId, "t1");
+  assert.equal(body.threads[0].t3ThreadId, "t1");
+  assert.equal(body.conversation.externalId, "job-1");
+  assert.equal(body.runs[0].trigger, "message");
 });
 
 test("bad secrets and bad signatures are rejected", async () => {
@@ -61,6 +64,10 @@ test("unexpected errors don't leak internals to the caller", async () => {
   const res = await post("/hooks/boom", {});
   assert.equal(res.status, 500);
   assert.deepEqual(await res.json(), { error: "Internal error." });
+});
+
+test("agent tools aren't served without an agent tool server, and never under /hooks", async () => {
+  assert.equal((await post("/agent/mcp", {})).status, 404);
 });
 
 test("unknown routes and oversized bodies are refused", async () => {

@@ -1,29 +1,23 @@
 import type { Worktree } from "./gateway.ts";
-import type { Store, TaskRecord } from "./store.ts";
-import type { RuntimeMode, T3 } from "./t3.ts";
+import type { Conversation, Store, ThreadRecord } from "./store.ts";
+import type { Project, RuntimeMode, T3 } from "./t3.ts";
 
-/** Unit of work handed to T3: one external conversation maps to one thread. */
-export interface Task {
-  /** Gateway name, e.g. "slack". */
-  source: string;
-  /** Stable id of the external conversation. Repeats become follow-ups. */
-  externalId: string;
+export interface LaunchRequest {
+  /** Unique within the conversation; launching an existing label returns that thread instead. */
+  label: string;
   /** T3 project id or title. */
   project: string;
   title: string;
   prompt: string;
-  /** Run in a new worktree instead of the project checkout. */
   worktree?: Worktree;
 }
 
-export type DispatchResult =
-  | { action: "launched"; task: TaskRecord }
-  | { action: "followed_up"; task: TaskRecord }
-  | { action: "in_progress"; task: TaskRecord };
+export type LaunchResult = { status: "launched" | "existing"; thread: ThreadRecord } | { status: "in_progress"; thread: ThreadRecord };
 
 /** A launch still marked "launching" after this long is treated as interrupted. */
 const STALE_LAUNCH_MS = 2 * 60_000;
 
+/** Starts and messages the T3 threads attached to conversations, safely under retries and crashes. */
 export class Dispatcher {
   private readonly t3: T3;
   private readonly store: Store;
@@ -36,64 +30,61 @@ export class Dispatcher {
     this.runtimeMode = runtimeMode;
   }
 
-  async dispatch(task: Task): Promise<DispatchResult> {
-    let existing = this.store.find(task.source, task.externalId);
-
-    if (existing?.status === "launching" && age(existing) > STALE_LAUNCH_MS) {
-      if (!(await this.adoptLaunchedThread(existing))) this.store.markFailed(existing.id, "Launch interrupted.");
-      existing = this.store.find(task.source, task.externalId);
+  async launch(conversation: Conversation, request: LaunchRequest): Promise<LaunchResult> {
+    let existing = this.store.findThread(conversation.id, request.label);
+    if (existing?.status === "launching" && Date.now() - Date.parse(existing.updatedAt) > STALE_LAUNCH_MS) {
+      if (!(await this.adopt(existing))) this.store.markThreadFailed(existing.id, "Launch interrupted.");
+      existing = this.store.findThread(conversation.id, request.label);
     }
-    if (existing?.status === "launched" && existing.threadId) {
-      await this.t3.sendToThread(existing.threadId, task.prompt);
-      return { action: "followed_up", task: existing };
-    }
+    if (existing?.status === "launched") return { status: "existing", thread: existing };
 
-    const projectId = await this.resolveProject(task.project);
-    const title = `[${task.source}] ${task.title}`;
-    const claimed = this.store.claim({ source: task.source, externalId: task.externalId, projectId, title });
-    if (!claimed) return { action: "in_progress", task: this.store.find(task.source, task.externalId)! };
+    const project = await this.resolveProject(request.project);
+    const title = `[${conversation.source}] ${request.title}`;
+    const claimed = this.store.claimThread({ conversationId: conversation.id, label: request.label, projectId: project.id, title });
+    if (!claimed) return { status: "in_progress", thread: this.store.findThread(conversation.id, request.label)! };
 
     try {
       const { threadId } = await this.t3.launchThread({
-        projectId,
+        projectId: project.id,
         title,
-        message: task.prompt,
-        workspaceStrategy: task.worktree ? { type: "worktree", ...task.worktree } : { type: "root" },
+        message: request.prompt,
+        workspaceStrategy: request.worktree ? { type: "worktree", ...request.worktree } : { type: "root" },
         runtimeMode: this.runtimeMode,
       });
-      this.store.markLaunched(claimed.id, threadId);
+      this.store.markThreadLaunched(claimed.id, threadId);
     } catch (error) {
       // t3_thread_launch has no idempotency key: the thread may exist even though the call failed.
-      if (!(await this.adoptLaunchedThread(claimed))) {
-        this.store.markFailed(claimed.id, String(error));
+      if (!(await this.adopt(claimed))) {
+        this.store.markThreadFailed(claimed.id, String(error));
         throw error;
       }
     }
-    return { action: "launched", task: this.store.get(claimed.id)! };
+    return { status: "launched", thread: this.store.getThread(claimed.id)! };
   }
 
-  private async resolveProject(project: string): Promise<string> {
+  async send(thread: ThreadRecord, text: string) {
+    if (!thread.t3ThreadId) throw new Error(`Thread "${thread.label}" hasn't started.`);
+    await this.t3.sendToThread(thread.t3ThreadId, text);
+  }
+
+  async resolveProject(project: string): Promise<Project> {
     const projects = await this.t3.listProjects();
     const wanted = project.toLowerCase();
     const match = projects.find((p) => p.id === project) ?? projects.find((p) => p.title.toLowerCase() === wanted);
     if (!match) throw new Error(`Unknown T3 project "${project}".`);
-    return match.id;
+    return match;
   }
 
   /** Finds a thread created for this claim by a launch whose response was lost. */
-  private async adoptLaunchedThread(record: TaskRecord): Promise<boolean> {
+  private async adopt(record: ThreadRecord): Promise<boolean> {
     try {
       const threads = await this.t3.listThreads(record.projectId, record.title);
       const thread = threads.find((t) => t.title === record.title && t.createdAt >= record.updatedAt);
       if (!thread) return false;
-      this.store.markLaunched(record.id, thread.threadId);
+      this.store.markThreadLaunched(record.id, thread.threadId);
       return true;
     } catch {
       return false;
     }
   }
-}
-
-function age(record: TaskRecord) {
-  return Date.now() - Date.parse(record.updatedAt);
 }
