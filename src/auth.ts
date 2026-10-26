@@ -39,7 +39,7 @@ export class FileOAuthProvider implements OAuthClientProvider {
 
   get clientMetadata(): OAuthClientMetadata {
     return {
-      client_name: "t3-connectors",
+      client_name: "t3-relay",
       redirect_uris: [REDIRECT_URL],
       grant_types: ["authorization_code"],
       response_types: ["code"],
@@ -138,7 +138,7 @@ function waitForCallback(expectedState: string, timeoutMs = 5 * 60_000): Promise
       const ok = !error && code && url.searchParams.get("state") === expectedState;
       res
         .writeHead(ok ? 200 : 400, { "content-type": "text/plain" })
-        .end(ok ? "t3-connectors is connected. You can close this tab." : "Login failed.");
+        .end(ok ? "t3-relay is connected. You can close this tab." : "Login failed.");
       finish(ok ? undefined : new Error(error ?? "Invalid OAuth callback (missing code or state mismatch)."), code);
     });
     const timer = setTimeout(() => finish(new Error("Timed out waiting for approval in T3.")), timeoutMs);
