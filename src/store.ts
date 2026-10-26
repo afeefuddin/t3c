@@ -2,8 +2,30 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { InboundMessage } from "./gateway.ts";
 
 export type TaskStatus = "launching" | "launched" | "failed";
+
+export type InboxStatus = "pending" | "processing" | "done" | "failed";
+
+export interface InboxRecord {
+  id: string;
+  message: InboundMessage;
+  status: InboxStatus;
+  taskId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A T3 thread whose answer still has to be posted back to its conversation. */
+export interface Relay {
+  threadId: string;
+  source: string;
+  conversationId: string;
+  /** Send time of the newest message awaiting an answer; earlier runs' answers are stale. */
+  since: string;
+}
 
 export interface TaskRecord {
   id: string;
@@ -31,7 +53,12 @@ interface Row {
   updated_at: string;
 }
 
-/** Maps (source, externalId) to the T3 thread doing the work. */
+/**
+ * Durable state:
+ * - inbox: verified incoming messages, saved before the webhook is answered so none are lost
+ * - tasks: maps (source, externalId) to the T3 thread doing the work
+ * - relays: answers still owed to a conversation, resumed after a restart
+ */
 export class Store {
   private readonly db: DatabaseSync;
 
@@ -53,7 +80,90 @@ export class Store {
         updated_at TEXT NOT NULL,
         UNIQUE (source, external_id)
       );
+      CREATE TABLE IF NOT EXISTS inbox (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        event_key TEXT NOT NULL,
+        message TEXT NOT NULL,
+        status TEXT NOT NULL,
+        task_id TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (source, event_key)
+      );
+      CREATE TABLE IF NOT EXISTS relays (
+        thread_id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        since TEXT NOT NULL
+      );
     `);
+  }
+
+  /** Saves a message for processing. Returns undefined when this delivery was already received. */
+  enqueue(message: InboundMessage): InboxRecord | undefined {
+    const now = new Date().toISOString();
+    const row = this.db
+      .prepare(
+        `INSERT INTO inbox (id, source, event_key, message, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?)
+         ON CONFLICT (source, event_key) DO NOTHING
+         RETURNING *`,
+      )
+      .get(randomUUID(), message.source, message.eventKey, JSON.stringify(message), now, now) as InboxRow | undefined;
+    return row && toInboxRecord(row);
+  }
+
+  getInbox(id: string): InboxRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM inbox WHERE id = ?").get(id) as InboxRow | undefined;
+    return row && toInboxRecord(row);
+  }
+
+  /** Takes the oldest pending message, marking it processing. */
+  nextInbox(): InboxRecord | undefined {
+    const row = this.db
+      .prepare(
+        `UPDATE inbox SET status = 'processing', updated_at = ?
+         WHERE id = (SELECT id FROM inbox WHERE status = 'pending' ORDER BY created_at, rowid LIMIT 1)
+         RETURNING *`,
+      )
+      .get(new Date().toISOString()) as InboxRow | undefined;
+    return row && toInboxRecord(row);
+  }
+
+  finishInbox(id: string, result: { taskId?: string; error?: string }) {
+    this.db
+      .prepare("UPDATE inbox SET status = ?, task_id = ?, error = ?, updated_at = ? WHERE id = ?")
+      .run(result.error ? "failed" : "done", result.taskId ?? null, result.error ?? null, new Date().toISOString(), id);
+  }
+
+  /** After a crash, messages left mid-processing go back to pending. */
+  requeueInterrupted() {
+    this.db.prepare("UPDATE inbox SET status = 'pending' WHERE status = 'processing'").run();
+  }
+
+  addRelay(relay: Relay) {
+    this.db
+      .prepare(
+        `INSERT INTO relays (thread_id, source, conversation_id, since) VALUES (?, ?, ?, ?)
+         ON CONFLICT (thread_id) DO UPDATE SET since = excluded.since`,
+      )
+      .run(relay.threadId, relay.source, relay.conversationId, relay.since);
+  }
+
+  relays(): Relay[] {
+    const rows = this.db.prepare("SELECT * FROM relays ORDER BY since").all() as {
+      thread_id: string;
+      source: string;
+      conversation_id: string;
+      since: string;
+    }[];
+    return rows.map((r) => ({ threadId: r.thread_id, source: r.source, conversationId: r.conversation_id, since: r.since }));
+  }
+
+  removeRelay(threadId: string) {
+    this.db.prepare("DELETE FROM relays WHERE thread_id = ?").run(threadId);
   }
 
   get(id: string): TaskRecord | undefined {
@@ -99,6 +209,28 @@ export class Store {
       .prepare("UPDATE tasks SET status = 'failed', error = ?, updated_at = ? WHERE id = ?")
       .run(error, new Date().toISOString(), id);
   }
+}
+
+interface InboxRow {
+  id: string;
+  message: string;
+  status: InboxStatus;
+  task_id: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function toInboxRecord(row: InboxRow): InboxRecord {
+  return {
+    id: row.id,
+    message: JSON.parse(row.message),
+    status: row.status,
+    taskId: row.task_id,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function toRecord(row: Row | undefined): TaskRecord | undefined {

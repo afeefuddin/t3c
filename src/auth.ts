@@ -41,7 +41,8 @@ export class FileOAuthProvider implements OAuthClientProvider {
     return {
       client_name: "t3c",
       redirect_uris: [REDIRECT_URL],
-      grant_types: ["authorization_code"],
+      // refresh_token lets the background service renew its access without a new login.
+      grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",
       scope: SCOPES,
@@ -110,6 +111,11 @@ function notLoggedIn(): never {
 }
 
 /** Interactive login: the user approves the connection in T3's /connect-agent page. */
+/** True once `t3c login` has stored tokens. */
+export function isLoggedIn(authFile: string) {
+  return Boolean(new FileOAuthProvider(authFile).tokens());
+}
+
 export async function login(serverUrl: string, authFile: string, open: (url: URL) => void) {
   let authorizationUrl: URL | undefined;
   const provider = new FileOAuthProvider(authFile, (url) => (authorizationUrl = url));

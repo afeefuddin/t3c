@@ -3,20 +3,28 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Turn incoming events into T3 Code threads.",
-  "bin": { "t3c": "./src/cli.ts" },
+  "description": "Start T3 Code threads from Slack, GitHub and webhooks.",
+  "bin": {
+    "t3c": "./dist/cli.js"
+  },
   "scripts": {
-    "t3c": "node src/cli.ts",
-    "serve": "node src/cli.ts serve",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "t3c": "node --disable-warning=ExperimentalWarning src/cli.ts",
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
     "typescript": "^7.0.2"
-  }
+  },
+  "files": [
+    "dist"
+  ]
 }

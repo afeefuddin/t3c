@@ -1,44 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Task } from "../src/connector.ts";
-import { Dispatcher } from "../src/dispatch.ts";
+import { Dispatcher, type Task } from "../src/dispatch.ts";
 import { Store } from "../src/store.ts";
-import type { LaunchInput, T3, ThreadSummary } from "../src/t3.ts";
-
-class FakeT3 implements T3 {
-  launches: LaunchInput[] = [];
-  sends: { threadId: string; message: string }[] = [];
-  threads: ThreadSummary[] = [];
-  /** When set, launch creates the thread but then throws (lost response). */
-  loseLaunchResponse = false;
-  failLaunch = false;
-
-  async listProjects() {
-    return [{ id: "p1", title: "Demo", workspaceRoot: "/tmp/demo" }];
-  }
-  async listThreads(_projectId: string, titleContains: string) {
-    return this.threads.filter((t) => t.title.includes(titleContains));
-  }
-  async launchThread(input: LaunchInput) {
-    if (this.failLaunch) throw new Error("boom");
-    this.launches.push(input);
-    const thread = {
-      threadId: `t${this.launches.length}`,
-      title: input.title,
-      status: "running",
-      createdAt: new Date().toISOString(),
-    };
-    this.threads.push(thread);
-    if (this.loseLaunchResponse) throw new Error("socket hang up");
-    return { threadId: thread.threadId };
-  }
-  async sendToThread(threadId: string, message: string) {
-    this.sends.push({ threadId, message });
-  }
-  async readThread() {
-    return {};
-  }
-}
+import { FakeT3 } from "./fake-t3.ts";
 
 const task = (overrides: Partial<Task> = {}): Task => ({
   source: "http",
@@ -66,6 +30,7 @@ test("launches a thread in the resolved project, then follows up on repeats", as
     title: "[http] Fix login",
     message: "Fix the login bug",
     workspaceStrategy: { type: "worktree", baseRef: "main", branch: "fix-login" },
+    runtimeMode: "auto-accept-edits",
   });
 
   const second = await dispatcher.dispatch(task({ prompt: "Also add a test" }));

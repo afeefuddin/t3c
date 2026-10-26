@@ -1,6 +1,20 @@
-import type { Task } from "./connector.ts";
+import type { Worktree } from "./gateway.ts";
 import type { Store, TaskRecord } from "./store.ts";
-import type { T3 } from "./t3.ts";
+import type { RuntimeMode, T3 } from "./t3.ts";
+
+/** Unit of work handed to T3: one external conversation maps to one thread. */
+export interface Task {
+  /** Gateway name, e.g. "slack". */
+  source: string;
+  /** Stable id of the external conversation. Repeats become follow-ups. */
+  externalId: string;
+  /** T3 project id or title. */
+  project: string;
+  title: string;
+  prompt: string;
+  /** Run in a new worktree instead of the project checkout. */
+  worktree?: Worktree;
+}
 
 export type DispatchResult =
   | { action: "launched"; task: TaskRecord }
@@ -13,10 +27,13 @@ const STALE_LAUNCH_MS = 2 * 60_000;
 export class Dispatcher {
   private readonly t3: T3;
   private readonly store: Store;
+  private readonly runtimeMode: RuntimeMode;
 
-  constructor(t3: T3, store: Store) {
+  /** `runtimeMode` caps what launched threads may do without approval in T3. */
+  constructor(t3: T3, store: Store, runtimeMode: RuntimeMode = "auto-accept-edits") {
     this.t3 = t3;
     this.store = store;
+    this.runtimeMode = runtimeMode;
   }
 
   async dispatch(task: Task): Promise<DispatchResult> {
@@ -42,6 +59,7 @@ export class Dispatcher {
         title,
         message: task.prompt,
         workspaceStrategy: task.worktree ? { type: "worktree", ...task.worktree } : { type: "root" },
+        runtimeMode: this.runtimeMode,
       });
       this.store.markLaunched(claimed.id, threadId);
     } catch (error) {

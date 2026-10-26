@@ -1,0 +1,136 @@
+import { spawn } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { isLoggedIn } from "./auth.ts";
+import { type Config, home, loadConfig, needsFunnel, paths, t3McpUrl } from "./config.ts";
+import { errorMessage } from "./log.ts";
+import { disableFunnel, enableFunnel, funnelBaseUrl } from "./tailscale.ts";
+import { say } from "./ui.ts";
+
+/** The background service: `t3c start` runs `t3c serve` detached, logging to ~/.t3c/t3c.log. */
+
+export function runningPid(): number | undefined {
+  if (!existsSync(paths.pid)) return;
+  const pid = Number(readFileSync(paths.pid, "utf8"));
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch {
+    rmSync(paths.pid, { force: true });
+  }
+}
+
+export async function start(entry: string) {
+  const pid = runningPid();
+  if (pid) {
+    say.ok(`t3c is already running (pid ${pid}). Use \`t3c restart\` to apply changes.`);
+    return;
+  }
+  const config = loadConfig();
+  if (!isLoggedIn(paths.auth)) throw new Error("t3c isn't connected to T3 Code yet. Run `t3c login` first.");
+  if (!config.slack && !config.github && !config.http) {
+    throw new Error("Nothing to run yet. Add a gateway first: `t3c add slack`, `t3c add github <owner/repo>` or `t3c add http`.");
+  }
+
+  say.step("Starting t3c");
+  if (needsFunnel(config)) {
+    const hooks = await enableFunnel(config.port);
+    say.ok(`Tailscale Funnel: ${hooks} (only /hooks is public)`);
+  }
+
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  const logFd = openSync(paths.log, "a", 0o600);
+  const child = spawn(process.execPath, [...process.execArgv, entry, "serve"], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
+  closeSync(logFd);
+  writeFileSync(paths.pid, String(child.pid));
+  child.unref();
+
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  if (await waitForHealth(config.port, exited)) {
+    say.ok(`Running in the background (pid ${child.pid}), listening on 127.0.0.1:${config.port}.`);
+    say.hint(`Logs: t3c logs -f   Stop: t3c stop`);
+  } else {
+    rmSync(paths.pid, { force: true });
+    say.warn("t3c stopped right after starting. Last log lines:");
+    console.log(tail(15));
+    process.exitCode = 1;
+  }
+}
+
+export async function stop({ keepFunnel = false } = {}) {
+  const pid = runningPid();
+  if (!pid) say.info("t3c isn't running.");
+  else {
+    process.kill(pid, "SIGTERM");
+    for (let i = 0; i < 50 && runningPid(); i++) await sleep(100);
+    if (runningPid()) process.kill(pid, "SIGKILL");
+    rmSync(paths.pid, { force: true });
+    say.ok(`Stopped t3c (pid ${pid}).`);
+  }
+  if (!keepFunnel && needsFunnel(loadConfig())) {
+    await disableFunnel().catch(() => {});
+    say.ok("Tailscale Funnel is off; nothing from t3c is reachable from the internet.");
+  }
+}
+
+export async function status() {
+  const config = loadConfig();
+  const pid = runningPid();
+  say.step("t3c");
+  if (pid) say.ok(`running (pid ${pid}) on 127.0.0.1:${config.port}`);
+  else say.warn("not running — `t3c start`");
+  if (isLoggedIn(paths.auth)) say.ok(`connected to T3 Code at ${t3McpUrl()}`);
+  else say.warn("not connected to T3 Code — `t3c login`");
+  say.info(`threads run as ${config.runtimeMode}`);
+
+  say.step("Gateways");
+  for (const line of describeGateways(config)) say.info(line);
+  if (needsFunnel(config)) {
+    const url = await funnelBaseUrl().catch((e) => `unavailable (${errorMessage(e)})`);
+    say.step("Public URL");
+    say.info(`${url}/hooks${pid ? "" : " (published while t3c runs)"}`);
+  }
+  say.hint(`config: ${paths.config}   logs: ${paths.log}`);
+}
+
+export function logs(follow: boolean) {
+  if (!existsSync(paths.log)) return say.info("No logs yet.");
+  if (!follow) return console.log(tail(50));
+  spawn("tail", ["-n", "50", "-f", paths.log], { stdio: "inherit" });
+}
+
+export function describeGateways(config: Config): string[] {
+  const lines: string[] = [];
+  if (config.slack) {
+    const channels = Object.entries(config.slack.channels).map(([c, p]) => `${c}→${p}`);
+    lines.push(`slack   ${channels.join(", ") || "no channels"}; ${config.slack.allowedUsers.length} allowed user(s)`);
+  }
+  if (config.github) {
+    const repos = Object.entries(config.github.repos).map(([r, p]) => `${r}→${p}`);
+    lines.push(`github  ${repos.join(", ")}; allowed: ${config.github.allowedUsers.join(", ")}`);
+  }
+  if (config.http) lines.push("http    POST /hooks/http (bearer secret)");
+  return lines.length > 0 ? lines : ["none yet — `t3c add slack`, `t3c add github <owner/repo>`, `t3c add http`"];
+}
+
+async function waitForHealth(port: number, exited: Promise<void>) {
+  let dead = false;
+  void exited.then(() => (dead = true));
+  for (let i = 0; i < 100 && !dead; i++) {
+    try {
+      if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return true;
+    } catch {}
+    await sleep(150);
+  }
+  return false;
+}
+
+function tail(lines: number) {
+  return readFileSync(paths.log, "utf8").trimEnd().split("\n").slice(-lines).join("\n");
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
