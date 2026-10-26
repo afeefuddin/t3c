@@ -1,0 +1,5 @@
+node_modules/
+.t3c/
+.env
+._*
+.DS_Store
