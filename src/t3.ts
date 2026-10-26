@@ -48,7 +48,7 @@ export class T3Client implements T3 {
     const transport = new StreamableHTTPClientTransport(new URL(serverUrl), {
       authProvider: new FileOAuthProvider(authFile),
     });
-    const client = new Client({ name: "t3-relay", version: "0.1.0" });
+    const client = new Client({ name: "t3c", version: "0.1.0" });
     await client.connect(transport);
     return new T3Client(client, transport);
   }

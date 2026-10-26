@@ -51,7 +51,7 @@ try {
   switch (values.help ? undefined : command) {
     case "login":
       await login(serverUrl, authFile, (url) => {
-        console.log(`Approve t3-relay in T3 Code:\n  ${url}`);
+        console.log(`Approve t3c in T3 Code:\n  ${url}`);
         if (process.platform === "darwin") execFile("open", [url.toString()]);
       });
       console.log(`Logged in. Credentials saved to ${authFile}.`);
