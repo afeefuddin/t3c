@@ -22,6 +22,9 @@ import { RUNTIME_MODES, type RuntimeMode, T3Client } from "./t3.ts";
 import { say } from "./ui.ts";
 import { Worker } from "./worker.ts";
 
+/** How often followed conversations are checked for messages that never arrived as webhooks. */
+const CATCH_UP_INTERVAL_MS = 20_000;
+
 const USAGE = `${color("bold", "t3c")} — start T3 Code threads from Slack, GitHub and webhooks
 
 ${color("bold", "Set up")} (once, in this order)
@@ -215,9 +218,6 @@ function showMessages(limit: number) {
     if (m.error) say.info(`  ${color("red", preview(m.error, 100))}`);
   }
 }
-
-/** How often followed conversations are checked for messages that never arrived as webhooks. */
-const CATCH_UP_INTERVAL_MS = 20_000;
 
 /** The service itself; `t3c start` runs this in the background. */
 async function serve() {
