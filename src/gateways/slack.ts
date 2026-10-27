@@ -69,6 +69,10 @@ export class SlackGateway implements Gateway {
     this.verify(header(headers, "x-slack-request-timestamp"), header(headers, "x-slack-signature"), body);
     const payload = JSON.parse(body.toString("utf8"));
     if (payload.type !== "event_callback") return {};
+    if (process.env.T3C_DEBUG) {
+      const e = payload.event as SlackEvent;
+      log(this.name, `debug: ${payload.event_id} ${e.type}${e.subtype ? `/${e.subtype}` : ""} in ${e.channel} from ${e.user ?? e.bot_id} thread=${e.thread_ts ?? "-"}`);
+    }
     const message = this.toMessage(payload.event_id, payload.event);
     return message ? { message } : {};
   }
