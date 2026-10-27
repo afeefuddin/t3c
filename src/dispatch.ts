@@ -1,6 +1,6 @@
 import type { Worktree } from "./gateway.ts";
 import type { Conversation, Store, ThreadRecord } from "./store.ts";
-import type { Project, RuntimeMode, T3, ThreadModel } from "./t3.ts";
+import type { Attachment, Project, RuntimeMode, T3, ThreadModel } from "./t3.ts";
 
 export interface LaunchRequest {
   /** Unique within the conversation; launching an existing label returns that thread instead. */
@@ -10,6 +10,7 @@ export interface LaunchRequest {
   title: string;
   prompt: string;
   worktree?: Worktree;
+  attachments?: Attachment[];
 }
 
 export type LaunchResult = { status: "launched" | "existing"; thread: ThreadRecord } | { status: "in_progress"; thread: ThreadRecord };
@@ -55,6 +56,7 @@ export class Dispatcher {
         message: request.prompt,
         workspaceStrategy: request.worktree ? { type: "worktree", ...request.worktree } : { type: "root" },
         runtimeMode: this.runtimeMode,
+        ...(request.attachments?.length && { attachments: request.attachments }),
         ...(this.model && { modelSelection: { instanceId: this.model.provider, model: this.model.model } }),
       });
       this.store.markThreadLaunched(claimed.id, threadId);
@@ -68,9 +70,9 @@ export class Dispatcher {
     return { status: "launched", thread: this.store.getThread(claimed.id)! };
   }
 
-  async send(thread: ThreadRecord, text: string) {
+  async send(thread: ThreadRecord, text: string, attachments?: Attachment[]) {
     if (!thread.t3ThreadId) throw new Error(`Thread "${thread.label}" hasn't started.`);
-    await this.t3.sendToThread(thread.t3ThreadId, text);
+    await this.t3.sendToThread(thread.t3ThreadId, text, attachments);
   }
 
   async resolveProject(project: string): Promise<Project> {

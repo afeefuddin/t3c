@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Dispatcher } from "../dispatch.ts";
-import type { Gateway, InboundMessage, Preparation, Worktree } from "../gateway.ts";
-import { log } from "../log.ts";
+import type { FileRef, Gateway, InboundMessage, Preparation, Worktree } from "../gateway.ts";
+import { errorMessage, log } from "../log.ts";
 import type { AgentRun, Conversation, Store, ThreadRecord } from "../store.ts";
-import type { T3 } from "../t3.ts";
+import { ATTACHMENT_LIMITS, type Attachment, attachmentType, type T3 } from "../t3.ts";
 import { threadPrompt } from "./prompts.ts";
 import type { Skill } from "./skills.ts";
 
@@ -19,6 +19,8 @@ export interface ToolContext {
   t3: T3;
   gateway: Gateway;
   conversation: Conversation;
+  /** Files sent with the messages this run handles; they go to whichever thread gets the work. */
+  requestFiles?: FileRef[];
 }
 
 /**
@@ -34,6 +36,8 @@ export class ConversationTools {
   private preparation: Promise<Preparation> | undefined;
   /** Threads list_threads showed this run, by T3 id: the only others the run may read or message. */
   private readonly listed = new Map<string, { projectId: string; title: string }>();
+  /** Threads this run already handed the request's files. */
+  private readonly filesSent = new Set<string>();
 
   constructor(ctx: ToolContext) {
     this.ctx = ctx;
@@ -167,6 +171,8 @@ export class ConversationTools {
           : undefined;
 
       const sentAt = new Date().toISOString();
+      // Everything shared in the conversation so far, newest kept when there are too many.
+      const files = [...(preparation.files ?? []), ...(this.ctx.requestFiles ?? [])];
       const result = await dispatcher.launch(conversation, {
         label,
         project: project.title,
@@ -175,10 +181,12 @@ export class ConversationTools {
           ? threadPrompt(input.prompt, { instructions: preparation.instructions })
           : threadPrompt(this.latestInbound().text, preparation),
         worktree,
+        attachments: await this.download(files.slice(-ATTACHMENT_LIMITS.perMessage)),
       });
       if (result.status === "in_progress") throw new Error(`Thread "${label}" is still starting.`);
       if (result.status === "launched") {
         this.launches++;
+        this.filesSent.add(result.thread.id);
         store.setAwaiting(result.thread.id, sentAt);
         log(conversation.source, `→ started T3 thread ${result.thread.t3ThreadId} in ${project.title} (${conversation.externalId})`, "ok");
       }
@@ -196,7 +204,9 @@ export class ConversationTools {
       if (!input.threadId && !input.label) throw new Error("Give the thread's label, or a threadId from list_threads.");
       const thread = input.threadId ? this.attach(input.threadId) : this.thread(input.label!);
       const sentAt = new Date().toISOString();
-      await this.ctx.dispatcher.send(thread, input.text);
+      const files = this.filesSent.has(thread.id) ? [] : (this.ctx.requestFiles ?? []);
+      await this.ctx.dispatcher.send(thread, input.text, await this.download(files.slice(-ATTACHMENT_LIMITS.perMessage)));
+      this.filesSent.add(thread.id);
       this.ctx.store.setAwaiting(thread.id, sentAt);
       log(this.ctx.conversation.source, `→ sent follow-up to T3 thread ${thread.t3ThreadId} (${thread.label})`, "ok");
       return { sent: true, thread: thread.label };
@@ -284,6 +294,27 @@ export class ConversationTools {
       .findLast((m) => m.direction === "in" && m.inbound);
     if (!latest?.inbound) throw new Error("This conversation has no incoming message.");
     return latest.inbound;
+  }
+
+  /** Fetches files through the gateway, skipping (and logging) any that are too big or fail. */
+  private async download(files: FileRef[]): Promise<Attachment[]> {
+    const { gateway, conversation } = this.ctx;
+    if (!gateway.download || files.length === 0) return [];
+    const unique = [...new Map(files.map((f) => [f.url, f])).values()];
+    const fetched = await Promise.all(
+      unique.map(async (file) => {
+        if (file.size > ATTACHMENT_LIMITS[attachmentType(file.mimeType)]) {
+          log(conversation.source, `skipped ${file.name}: too big to attach (${file.size} bytes)`, "warn");
+          return;
+        }
+        try {
+          return { name: file.name, mimeType: file.mimeType, data: await gateway.download!(file) };
+        } catch (error) {
+          log(conversation.source, `couldn't fetch ${file.name}: ${errorMessage(error)}`, "warn");
+        }
+      }),
+    );
+    return fetched.filter((f) => f !== undefined);
   }
 
   private prepare(): Promise<Preparation> {

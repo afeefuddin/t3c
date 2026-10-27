@@ -1,4 +1,4 @@
-import type { Gateway, InboundMessage, Preparation } from "../src/gateway.ts";
+import type { FileRef, Gateway, InboundMessage, Preparation } from "../src/gateway.ts";
 
 /** Records replies and acknowledgements; prepare returns fixed context and worktree. */
 export class FakeGateway implements Gateway {
@@ -13,6 +13,13 @@ export class FakeGateway implements Gateway {
   async prepare() {
     if (this.failPrepare) throw new Error("issue not found");
     return this.preparation;
+  }
+  /** Files' contents by url; others fail to download. */
+  files = new Map<string, string>();
+  async download(file: FileRef) {
+    const data = this.files.get(file.url);
+    if (data === undefined) throw new Error("not found");
+    return Buffer.from(data);
   }
   async acknowledge(message: InboundMessage) {
     this.acks.push(message.eventKey);

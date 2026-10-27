@@ -148,7 +148,8 @@ export class Worker {
   /** One brain run with conversation-scoped tools, recorded in agent_runs. Returns an error message, if any. */
   private async run(conversation: Conversation, event: AgentEvent): Promise<string | undefined> {
     const gateway = this.gateway(conversation.source);
-    const tools = new ConversationTools({ store: this.store, dispatcher: this.dispatcher, t3: this.t3, gateway, conversation });
+    const requestFiles = event.type === "message" ? event.messages.flatMap((m) => m.inbound?.files ?? []) : [];
+    const tools = new ConversationTools({ store: this.store, dispatcher: this.dispatcher, t3: this.t3, gateway, conversation, requestFiles });
     const run = this.store.startRun(conversation.id, event.type);
     try {
       const outcome = await this.brain.handle(event, tools);

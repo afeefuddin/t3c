@@ -1,4 +1,4 @@
-import type { LaunchInput, Project, T3, ThreadReply, ThreadSummary } from "../src/t3.ts";
+import type { Attachment, LaunchInput, Project, T3, ThreadReply, ThreadSummary } from "../src/t3.ts";
 
 /** In-memory T3: records launches and sends; answers immediately unless `gate` holds them. */
 export class FakeT3 implements T3 {
@@ -7,7 +7,7 @@ export class FakeT3 implements T3 {
     { id: "p2", title: "Web", workspaceRoot: "/tmp/web" },
   ];
   launches: LaunchInput[] = [];
-  sends: { threadId: string; message: string }[] = [];
+  sends: { threadId: string; message: string; attachments?: Attachment[] }[] = [];
   threads: ThreadSummary[] = [];
   waits: { threadId: string; since: string }[] = [];
   /** When set, launch creates the thread but then throws (lost response). */
@@ -36,8 +36,8 @@ export class FakeT3 implements T3 {
     if (this.loseLaunchResponse) throw new Error("socket hang up");
     return { threadId: thread.threadId };
   }
-  async sendToThread(threadId: string, message: string) {
-    this.sends.push({ threadId, message });
+  async sendToThread(threadId: string, message: string, attachments?: Attachment[]) {
+    this.sends.push({ threadId, message, ...(attachments?.length && { attachments }) });
   }
   async recentMessages(threadId: string) {
     return { status: "running", messages: [{ type: "assistant_message", text: `working on ${threadId}` }] };

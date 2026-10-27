@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
-import { type SlackEvent, SlackGateway, slackChallenge, slackManifest, toSlackMarkdown } from "../src/gateways/slack.ts";
+import { render, type SlackEvent, SlackGateway, slackChallenge, slackManifest, toSlackMarkdown } from "../src/gateways/slack.ts";
 import { Store } from "../src/store.ts";
 
 const BOT = "UBOT";
@@ -266,4 +266,60 @@ test("catch-up reaches back to t3c's first message in a channel, so mentions sen
   const whileDown = (now - 600).toFixed(6);
   history.push({ type: "message", channel: "C1", ts: whileDown, user: "UALICE", text: `<@${BOT}> sent while t3c was down` });
   assert.deepEqual((await gateway.catchUp()).map((m) => m.text), ["sent while t3c was down"]);
+});
+
+const shot = { name: "shot.png", mimetype: "image/png", size: 3, url_private_download: "https://files.slack.com/shot.png" };
+
+test("a message is read whole: bot cards, link previews, forwarded messages, blocks and files", () => {
+  const text = render({
+    type: "message",
+    channel: "C1",
+    ts: "1.0",
+    text: "CI is red",
+    attachments: [
+      { title: "Build #88 failed", title_link: "https://ci/88", text: "rails tests", fields: [{ title: "Branch", value: "main" }] },
+      { fallback: "forwarded: login 404s", files: [{ ...shot, name: "fwd.png" }] },
+    ],
+    blocks: [
+      { type: "rich_text" },
+      { type: "section", text: { text: "Failed step: rspec" } },
+      { type: "context", elements: [{ type: "mrkdwn", text: "by GitHub Actions" }] },
+    ],
+    files: [shot, { name: "gone.png", mode: "tombstone" }],
+  });
+  assert.equal(
+    text,
+    [
+      "CI is red",
+      "> Build #88 failed (https://ci/88)\n> rails tests\n> Branch: main",
+      "> forwarded: login 404s",
+      "Failed step: rspec\nby GitHub Actions",
+      "[file: shot.png (image/png)]",
+      "[file: fwd.png (image/png)]",
+    ].join("\n"),
+  );
+});
+
+test("messages with files are requests too, even with no text, and carry the files along", async () => {
+  const { gateway, store } = await setup();
+  const first = gateway.receive(eventCallback({ text: `<@${BOT}> why is this broken?`, files: [shot] })).message!;
+  assert.deepEqual(first.files, [{ name: "shot.png", mimeType: "image/png", size: 3, url: "https://files.slack.com/shot.png" }]);
+  assert.equal(first.text, "why is this broken?\n[file: shot.png (image/png)]");
+  store.enqueue(first);
+  // A screenshot dropped into the thread (Slack marks it file_share) is a follow-up, not ignored.
+  const reply = gateway.receive(eventCallback({ type: "message", subtype: "file_share", ts: "100.2", thread_ts: "100.1", text: "", files: [shot] }, "Ev2")).message;
+  assert.equal(reply?.text, "[file: shot.png (image/png)]");
+  assert.equal(reply?.files?.length, 1);
+});
+
+test("prepare includes everything in the earlier thread, files too", async () => {
+  const { gateway, history } = await setup();
+  history.push(
+    { type: "message", channel: "C1", ts: "90.0", bot_id: "B1", text: "", attachments: [{ title: "Deploy failed" }] },
+    { type: "message", channel: "C1", ts: "91.0", thread_ts: "90.0", user: "UBOB", text: "here", files: [shot] },
+  );
+  const { message } = gateway.receive(eventCallback({ thread_ts: "90.0", text: `<@${BOT}> fix this` }));
+  const prepared = await gateway.prepare(message!);
+  assert.equal(prepared.context, "a bot: > Deploy failed\n@UBOB: here\n[file: shot.png (image/png)]");
+  assert.deepEqual(prepared.files?.map((f) => f.name), ["shot.png"]);
 });
