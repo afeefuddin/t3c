@@ -88,6 +88,12 @@ function buildServer(tools: ConversationTools) {
     { label: z.string().describe("The thread's label"), text: z.string().max(20_000) },
     (i) => tools.sendToThread(i),
   );
+  add(
+    "interrupt_thread",
+    "Stop a thread's running turn (it's stuck or going the wrong way). Then send_to_thread to restart it with directions.",
+    { label: z.string().describe("The thread's label"), reason: z.string().max(2_000) },
+    (i) => tools.interruptThread(i),
+  );
   add("reply", "Post a message in this conversation (Markdown).", { text: z.string().max(20_000) }, (i) => tools.reply(i));
   add(
     "update_summary",

@@ -6,7 +6,20 @@ import type { ConversationTools } from "./agent/tools.ts";
 /** Why the agent woke up. */
 export type AgentEvent =
   | { type: "message"; message: StoredMessage }
-  | { type: "thread_finished"; thread: ThreadRecord; reply: ThreadReply };
+  /** `attempt` counts this thread's waiting/failed/stuck episodes in a row without progress. */
+  | { type: "thread_finished"; thread: ThreadRecord; reply: ThreadReply; attempt: number }
+  | { type: "thread_stalled"; thread: ThreadRecord; reply: ThreadReply; idleMinutes: number; attempt: number };
+
+/** What to tell a thread that's waiting, failed or stuck, so it carries on without a person. */
+export function unblockMessage(event: Extract<AgentEvent, { type: "thread_finished" | "thread_stalled" }>): string {
+  if (event.type === "thread_stalled") {
+    return `No progress for ${event.idleMinutes} minutes. If a command is hanging, stop it and try another way. If you're unsure how to proceed, pick the most reasonable option and continue. Nobody is available to answer questions.`;
+  }
+  if (event.reply.status === "waiting") {
+    return "Nobody is available to answer. Choose the most reasonable option yourself, continue, and list your assumptions in your final answer.";
+  }
+  return `The last run ended with status "${event.reply.status}". Find out what went wrong, fix it, and finish the task.`;
+}
 
 /**
  * Decides what to do about an event, acting only through the conversation's tools.
@@ -26,9 +39,19 @@ export class SimpleBrain implements Brain {
   readonly name = "simple";
 
   async handle(event: AgentEvent, tools: ConversationTools): Promise<string> {
+    if (event.type === "thread_stalled") {
+      // A nudge first; a second time, stop the stuck turn and restart it with the same direction.
+      if (event.attempt > 1) await tools.interruptThread({ label: event.thread.label, reason: "No progress" });
+      await tools.sendToThread({ label: event.thread.label, text: unblockMessage(event) });
+      return `${event.attempt > 1 ? "restarted" : "nudged"} stuck thread "${event.thread.label}"`;
+    }
     if (event.type === "thread_finished") {
-      await tools.reply({ text: describeReply(event.reply) });
-      return `posted the answer of "${event.thread.label}"`;
+      if (event.reply.status === "completed" || event.reply.status === "idle") {
+        await tools.reply({ text: describeReply(event.reply) });
+        return `posted the answer of "${event.thread.label}"`;
+      }
+      await tools.sendToThread({ label: event.thread.label, text: unblockMessage(event) });
+      return `told "${event.thread.label}" (${event.reply.status}) to carry on`;
     }
 
     const threads = tools.launchedThreads();

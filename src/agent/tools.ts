@@ -8,7 +8,7 @@ import { threadPrompt } from "./prompts.ts";
 /** Per-run caps, so a confused or manipulated run can't spam or fan out. */
 export const LIMITS = { replies: 3, launches: 3 };
 
-const ACTING_TOOLS = new Set(["start_thread", "send_to_thread", "reply"]);
+const ACTING_TOOLS = new Set(["start_thread", "send_to_thread", "interrupt_thread", "reply"]);
 
 export interface ToolContext {
   store: Store;
@@ -127,6 +127,16 @@ export class ConversationTools {
       this.ctx.store.setAwaiting(thread.id, sentAt);
       log(this.ctx.conversation.source, `→ sent follow-up to T3 thread ${thread.t3ThreadId} (${thread.label})`, "ok");
       return { sent: true, thread: thread.label };
+    });
+  }
+
+  /** Stops a thread's running turn, e.g. when it's stuck. Send it a message afterwards to restart it. */
+  interruptThread(input: { label: string; reason: string }) {
+    return this.record("interrupt_thread", input, async () => {
+      const thread = this.thread(input.label);
+      await this.ctx.t3.interruptThread(thread.t3ThreadId!, input.reason);
+      log(this.ctx.conversation.source, `⏹ interrupted T3 thread ${thread.t3ThreadId} (${thread.label}): ${input.reason}`, "warn");
+      return { interrupted: true, thread: thread.label };
     });
   }
 

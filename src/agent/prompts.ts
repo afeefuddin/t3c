@@ -52,7 +52,11 @@ function describeEvent(event: AgentEvent): string {
     return `${author} sent a new message${inbound ? ` via ${inbound.source}` : ""}. This is the request to act on:\n${fence("request", text)}`;
   }
   const { thread, reply } = event;
-  return `The T3 thread "${thread.label}" (${thread.title}) stopped with status "${reply.status}". Its last answer:\n${fence("thread-answer", reply.text ?? "(none)")}`;
+  const attempt = event.attempt > 1 ? ` This is attempt ${event.attempt} to get it going.` : "";
+  if (event.type === "thread_stalled") {
+    return `The T3 thread "${thread.label}" (${thread.title}) is "${reply.status}" but has made no progress for ${event.idleMinutes} minutes.${attempt} Its latest message:\n${fence("thread-answer", reply.text ?? "(none)")}`;
+  }
+  return `The T3 thread "${thread.label}" (${thread.title}) stopped with status "${reply.status}".${attempt} Its last answer:\n${fence("thread-answer", reply.text ?? "(none)")}`;
 }
 
 /**

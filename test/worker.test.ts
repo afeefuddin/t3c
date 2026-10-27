@@ -8,10 +8,10 @@ import { Worker } from "../src/worker.ts";
 import { FakeT3 } from "./fake-t3.ts";
 import { FakeGateway, message } from "./helpers.ts";
 
-function setup({ store = new Store(":memory:"), brain = new SimpleBrain() as Brain } = {}) {
+function setup({ store = new Store(":memory:"), brain = new SimpleBrain() as Brain, stallMs = 15 * 60_000 } = {}) {
   const t3 = new FakeT3();
   const gateway = new FakeGateway();
-  const worker = new Worker({ gateways: [gateway], dispatcher: new Dispatcher(t3, store), store, t3, brain });
+  const worker = new Worker({ gateways: [gateway], dispatcher: new Dispatcher(t3, store), store, t3, brain, stallMs });
   return { t3, store, gateway, worker };
 }
 
@@ -157,4 +157,74 @@ test("recent and active messages span conversations, newest last", async () => {
   assert.deepEqual(store.recentMessages(5).map((m) => m.text), ["first", "second"]);
   assert.deepEqual(store.recentMessages(1).map((m) => m.text), ["second"]);
   assert.deepEqual(store.activeMessages().map((m) => m.text), ["second"]);
+});
+
+test("a finished thread is settled, unless more work was sent to it", async () => {
+  const { t3, worker } = setup();
+  worker.enqueue(message());
+  await worker.idle();
+  assert.deepEqual(t3.settled, ["t1"]);
+});
+
+test("a waiting or failed thread is told to carry on, not reported to the person", async () => {
+  const { t3, gateway, worker } = setup();
+  t3.answers.push({ status: "waiting", text: "Should I use Postgres or SQLite?" }, { status: "failed", text: "tests failed" });
+  worker.enqueue(message());
+  await worker.idle();
+  assert.match(t3.sends[0].message, /Nobody is available to answer\. Choose the most reasonable option/);
+  assert.match(t3.sends[1].message, /ended with status "failed"\. Find out what went wrong/);
+  // Then it completed: one reply with the answer, no questions passed on, and it's settled.
+  assert.deepEqual(gateway.replies.map((r) => r.text), ["**Done** in t1"]);
+  assert.deepEqual(t3.settled, ["t1"]);
+});
+
+test("a thread that keeps waiting is given up on after 3 attempts, with one message to the person", async () => {
+  const { t3, gateway, store, worker } = setup();
+  for (let i = 0; i < 4; i++) t3.answers.push({ status: "waiting", text: "?" });
+  worker.enqueue(message());
+  await worker.idle();
+  assert.equal(t3.sends.length, 3);
+  assert.equal(gateway.replies.length, 1);
+  assert.match(gateway.replies[0].text, /still isn't moving after 3 attempts/);
+  assert.deepEqual(store.awaitingThreads(), []);
+  assert.deepEqual(t3.settled, []);
+});
+
+test("the supervisor nudges a stuck thread, then restarts it, then gives up", async () => {
+  const { t3, gateway, store, worker } = setup({ stallMs: 0 });
+  let release!: () => void;
+  t3.gate = new Promise((r) => (release = r));
+  worker.enqueue(message());
+  await new Promise((r) => setTimeout(r, 20));
+  t3.state.set("t1", { status: "running", items: 7 });
+
+  await worker.supervise(); // first look: remembers the item count
+  await worker.supervise(); // no progress → attempt 1: nudge
+  assert.match(t3.sends.at(-1)!.message, /No progress for 0 minutes/);
+  assert.equal(t3.interrupts.length, 0);
+
+  await worker.supervise(); // still none → attempt 2: stop the turn and restart it
+  assert.equal(t3.interrupts.length, 1);
+  assert.equal(t3.sends.length, 2);
+
+  // Progress resets the count: the next stall is attempt 1 again.
+  t3.state.set("t1", { status: "running", items: 8 });
+  await worker.supervise();
+  await worker.supervise();
+  assert.equal(t3.interrupts.length, 1);
+  assert.equal(t3.sends.length, 3);
+
+  await worker.supervise(); // attempt 2
+  await worker.supervise(); // attempt 3
+  assert.equal(gateway.replies.length, 0);
+  await worker.supervise(); // attempt 4: give up, stop it, tell the person once
+  assert.equal(t3.interrupts.length, 4);
+  assert.match(gateway.replies[0].text, /still isn't moving after 3 attempts/);
+  assert.deepEqual(store.awaitingThreads(), []);
+  await worker.supervise();
+  assert.equal(gateway.replies.length, 1);
+
+  release();
+  await worker.idle();
+  assert.equal(gateway.replies.length, 1); // the late answer isn't posted over the give-up
 });

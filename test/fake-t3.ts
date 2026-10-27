@@ -15,6 +15,12 @@ export class FakeT3 implements T3 {
   failLaunch = false;
   /** Lets a test hold answers back until it resolves this. */
   gate: Promise<void> = Promise.resolve();
+  /** Answers waitForReply hands out in order; then "completed". */
+  answers: ThreadReply[] = [];
+  /** What progress() reports, per thread id. */
+  state = new Map<string, { status: string; items: number }>();
+  settled: string[] = [];
+  interrupts: { threadId: string; reason: string }[] = [];
 
   async listProjects() {
     return this.projects;
@@ -39,7 +45,16 @@ export class FakeT3 implements T3 {
   async waitForReply(threadId: string, since: string): Promise<ThreadReply> {
     this.waits.push({ threadId, since });
     await this.gate;
-    return { status: "completed", text: `**Done** in ${threadId}` };
+    return this.answers.shift() ?? { status: "completed", text: `**Done** in ${threadId}` };
+  }
+  async progress(threadId: string) {
+    return this.state.get(threadId) ?? { status: "completed", items: 1 };
+  }
+  async settleThread(threadId: string) {
+    this.settled.push(threadId);
+  }
+  async interruptThread(threadId: string, reason: string) {
+    this.interrupts.push({ threadId, reason });
   }
   async latestReply(threadId: string): Promise<ThreadReply> {
     return { status: "running", text: `progress in ${threadId}` };

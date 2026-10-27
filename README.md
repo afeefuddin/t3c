@@ -75,6 +75,9 @@ Events are a new message, or a T3 thread that finished.
   you mean.
 - **Answering:** status questions get a short reply without disturbing the thread. When a thread
   finishes, it posts a short summary.
+- **Looking after threads:** finished threads are settled in T3. A thread that waits for input, fails,
+  or makes no progress for 15 minutes is unblocked by the agent (it answers, redirects or restarts
+  it); after 3 tries without progress you're told once.
 
 Its behaviour comes from **skills**: Markdown files in `~/.t3c/skills`. Edit them, or add your own.
 

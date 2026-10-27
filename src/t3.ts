@@ -49,6 +49,12 @@ export interface T3 {
   waitForReply(threadId: string, since: string): Promise<ThreadReply>;
   /** The thread's current status and its latest run's last answer, without waiting. */
   latestReply(threadId: string): Promise<ThreadReply>;
+  /** Status and how many items (messages, tool calls) it has; a changing count means progress. */
+  progress(threadId: string): Promise<{ status: string; items: number }>;
+  /** Moves a finished thread out of T3's active list. */
+  settleThread(threadId: string): Promise<void>;
+  /** Stops the thread's running turn. */
+  interruptThread(threadId: string, reason: string): Promise<void>;
 }
 
 export interface ThreadReply {
@@ -67,7 +73,7 @@ interface ThreadState {
 type ToolCaller = Pick<Client, "callTool">;
 
 /** Thread statuses that mean a run is still in progress. */
-const WORKING = new Set(["preparing", "queued", "starting", "running"]);
+export const WORKING = new Set(["preparing", "queued", "starting", "running"]);
 /** Stays under the MCP SDK's 60s default request timeout. */
 const WAIT_SLICE_MS = 45_000;
 const MAX_WAIT_MS = 2 * 60 * 60_000;
@@ -127,7 +133,22 @@ export class T3Client implements T3 {
   }
 
   async sendToThread(threadId: string, message: string) {
+    // A settled thread is back in the active list once it has work again.
+    await this.call("t3_thread_organize", { threadId, action: "unsettle" }).catch(() => {});
     await this.call("t3_thread_send", { threadId, message, mode: "auto" });
+  }
+
+  async progress(threadId: string) {
+    const { thread } = await this.call<ThreadState>("t3_thread_read", { threadId, limit: 1, maxCharsPerItem: 1 });
+    return { status: thread.status, items: thread.itemCount };
+  }
+
+  async settleThread(threadId: string) {
+    await this.call("t3_thread_organize", { threadId, action: "settle" });
+  }
+
+  async interruptThread(threadId: string, reason: string) {
+    await this.call("t3_thread_interrupt", { threadId, reason: reason.slice(0, 2000) });
   }
 
   async readThread(threadId: string) {

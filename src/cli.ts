@@ -24,6 +24,8 @@ import { Worker } from "./worker.ts";
 
 /** How often followed conversations are checked for messages that never arrived as webhooks. */
 const CATCH_UP_INTERVAL_MS = 20_000;
+/** How often running T3 threads are checked for being stuck. */
+const SUPERVISE_INTERVAL_MS = 2 * 60_000;
 
 const USAGE = `${color("bold", "t3c")} — start T3 Code threads from Slack, GitHub and webhooks
 
@@ -256,6 +258,8 @@ async function serve() {
   // Webhooks get lost sometimes, and none arrive while this machine sleeps.
   void worker.catchUp();
   setInterval(() => void worker.catchUp(), CATCH_UP_INTERVAL_MS);
+  // Checks running threads for ones that are stuck.
+  setInterval(() => void worker.supervise(), SUPERVISE_INTERVAL_MS);
 
   // Never bind publicly: the internet reaches t3c only through Tailscale Funnel, and only /hooks.
   const server = createApp({ gateways, worker, store, secret: config.http?.secret, agentTools });
