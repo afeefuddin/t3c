@@ -6,7 +6,7 @@ import type { T3 } from "../t3.ts";
 import { threadPrompt } from "./prompts.ts";
 
 /** Per-run caps, so a confused or manipulated run can't spam or fan out. */
-export const LIMITS = { replies: 3, launches: 3 };
+export const LIMITS = { replies: 3, launches: 3, replyChars: 400 };
 
 const ACTING_TOOLS = new Set(["start_thread", "send_to_thread", "interrupt_thread", "reply"]);
 
@@ -142,7 +142,15 @@ export class ConversationTools {
 
   /** Posts into this conversation (Markdown). */
   reply(input: { text: string }) {
-    return this.record("reply", input, () => this.post(input.text));
+    return this.record("reply", input, () => {
+      // Chat replies are read on a phone between other things: anything longer gets rewritten.
+      if (input.text.length > LIMITS.replyChars) {
+        throw new Error(
+          `Too long for chat (${input.text.length} characters, max ${LIMITS.replyChars}). Rewrite it as one or two short sentences with just the answer.`,
+        );
+      }
+      return this.post(input.text);
+    });
   }
 
   /** Replaces the agent's running notes about this conversation. */

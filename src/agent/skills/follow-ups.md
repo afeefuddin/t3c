@@ -7,5 +7,5 @@ Use when a message arrives in a conversation that already has threads.
   it's about by label; if unclear, the most recent one. A thread that's still busy picks the
   message up too.
 - **A status question** ("how's it going?", "is it done?"): `read_thread` and `reply` with a
-  one- or two-line update. Don't message the thread.
+  one-sentence update. Don't message the thread.
 - **A new, unrelated request**: handle it as a new request, in a thread with its own label.

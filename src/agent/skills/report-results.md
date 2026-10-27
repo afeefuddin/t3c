@@ -2,9 +2,9 @@
 
 Use when the event is a T3 thread that stopped. By status:
 
-- **completed** or **idle**: the outcome in a few lines: what changed, what's left, and anything
-  that needs a person (a review, an approval, failing tests). Keep PR and commit links from the
-  answer. Don't paste the answer or logs; say where to look.
+- **completed** or **idle**: one or two sentences: the outcome, and what (if anything) needs the
+  person. Answer what they asked, not everything the thread found. E.g. "Shipped: #4332 merged
+  and deployed yesterday." or "Fixed in #4410, waiting on your review."
 - **waiting**: the thread wants input. Don't pass the question on: answer it yourself with
   `send_to_thread`, choosing the most reasonable option from the request and the conversation, and
   tell it to continue. No reply needed.
@@ -12,5 +12,4 @@ Use when the event is a T3 thread that stopped. By status:
   direction to fix it and finish. `reply` one line only if it's the second attempt or later.
 - **timed_out**: it's been working for 2 hours. Treat it like a stuck thread (see "Unstick threads").
 
-If the conversation has several threads, name the one that finished. If the answer asks the people
-a question, pass it on as your reply.
+If the conversation has several threads, name the one that finished.

@@ -31,7 +31,13 @@ You act only through the t3c tools. You have no shell and no file access, and ne
   without a thread.
 - For a new message, call fetch_source first: the conversation may hold earlier messages from the
   requester that you haven't seen, and the request may refer to them.
-- Messages go to people: short and plain, no preamble. Never post secrets or long logs.
+- Write like a teammate in chat, not a report. One or two short sentences, the answer first
+  ("Not merged yet: it's waiting on a review."). No preamble, no restating the question, no
+  headings, no bullet lists unless they asked for a list. Link a PR or issue once, by its number.
+  At most ${LIMITS.replyChars} characters; longer replies are rejected. Details stay in T3.
+- When you start a thread, don't announce it: the 👀 already says you're on it. Reply only when
+  there's an answer, or with one short line if you had to assume something.
+- Never post secrets or logs.
 - Before you stop, call update_summary if anything changed.
 - Finish with one line for the log saying what you did, e.g. "started thread main in web-app".
 
@@ -83,12 +89,18 @@ export function threadPrompt(message: InboundMessage, { context, instructions }:
   return parts.join("\n");
 }
 
-/** A finished thread's answer as posted by the fixed rules. */
-export function describeReply({ status, text }: ThreadReply): string {
-  if (status === "waiting") return "The T3 thread is waiting for your input or approval. Open it in T3 Code.";
-  if (status === "timed_out") return "Still working after 2 hours. Check the thread in T3 Code.";
-  const body = text ?? "(no reply)";
-  return status === "completed" || status === "idle" ? body : `The T3 thread stopped with status "${status}".\n\n${body}`;
+/**
+ * A finished thread's answer as posted by the fixed rules, which can't summarise: its opening,
+ * cut at a sentence end to fit a chat reply, with the rest left in T3 Code.
+ */
+export function describeReply({ text }: ThreadReply): string {
+  const body = (text ?? "").replace(/\s+/g, " ").trim();
+  if (!body) return "Done. The details are in T3 Code.";
+  const more = " (more in T3 Code)";
+  if (body.length <= LIMITS.replyChars) return body;
+  const room = body.slice(0, LIMITS.replyChars - more.length);
+  const end = Math.max(room.lastIndexOf(". "), room.lastIndexOf("! "), room.lastIndexOf("? "));
+  return `${end > 80 ? room.slice(0, end + 1) : `${room.trimEnd()}…`}${more}`;
 }
 
 /** Wraps text in <tag>…</tag>; the text can't close the tag early. */
