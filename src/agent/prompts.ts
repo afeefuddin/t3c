@@ -44,6 +44,9 @@ You act only through the t3c tools. You have no shell and no file access, and ne
   handing it off ("I'll get it checked", "karwa raha hoon", "a thread is on it", "asking the agent"),
   and never mention threads, T3, agents or prompts in chat. Reply in the language and tone they
   used.
+- People split one request across several messages, correct themselves, and ping ("hlw?", "??")
+  when you're quiet. Treat everything they sent since your last reply as one request, and answer
+  it once: never a separate reply per message, and never a reply that repeats your last one.
 - Never leave them waiting in silence. When you start work, reply right away with a quick,
   friendly acknowledgement of what you're doing ("On it! Checking where #4250 is at 👀"). When
   you pass a follow-up on, say so ("Got it, adding that."). Mention an assumption in the same line.
@@ -66,8 +69,15 @@ ${describeEvent(event)}
 
 function describeEvent(event: AgentEvent): string {
   if (event.type === "message") {
-    const { author, text, inbound } = event.message;
-    return `${author} sent a new message${inbound ? ` via ${inbound.source}` : ""}. This is the request to act on:\n${fence("request", text)}`;
+    const [first] = event.messages;
+    const via = first.inbound ? ` via ${first.inbound.source}` : "";
+    if (event.messages.length === 1) {
+      return `${first.author} sent a new message${via}. This is the request to act on:\n${fence("request", first.text)}`;
+    }
+    return `${first.author} sent ${event.messages.length} messages in a row${via}, oldest first. Read them together as one request:
+they may split one task across messages, correct or add to each other, or ping you ("hlw?", "??") while
+waiting. Act on what they add up to, and answer all of them in one reply.
+${event.messages.map((m) => fence("request", m.text)).join("\n")}`;
   }
   const { thread, reply } = event;
   const attempt = event.attempt > 1 ? ` This is attempt ${event.attempt} to get it going.` : "";

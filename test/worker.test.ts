@@ -8,10 +8,10 @@ import { Worker } from "../src/worker.ts";
 import { FakeT3 } from "./fake-t3.ts";
 import { answers, FakeGateway, message } from "./helpers.ts";
 
-function setup({ store = new Store(":memory:"), brain = new SimpleBrain() as Brain, stallMs = 15 * 60_000 } = {}) {
+function setup({ store = new Store(":memory:"), brain = new SimpleBrain() as Brain, stallMs = 15 * 60_000, quietMs = 0 } = {}) {
   const t3 = new FakeT3();
   const gateway = new FakeGateway();
-  const worker = new Worker({ gateways: [gateway], dispatcher: new Dispatcher(t3, store), store, t3, brain, stallMs });
+  const worker = new Worker({ gateways: [gateway], dispatcher: new Dispatcher(t3, store), store, t3, brain, stallMs, quietMs });
   return { t3, store, gateway, worker };
 }
 
@@ -114,7 +114,7 @@ test("after a restart, interrupted messages and owed answers resume", async () =
   store.setAwaiting(thread.id, new Date().toISOString());
   // …and crashed while handling a new message in conv-1.
   store.enqueue(message());
-  store.nextPending();
+  store.takePending();
 
   const { t3, gateway, worker } = setup({ store });
   worker.start();
@@ -246,4 +246,30 @@ test("an attached thread's answer comes back, and t3c leaves the thread unsettle
   await worker.idle();
   assert.ok(gateway.replies.some((r) => r.text === "**Done** in ext1"));
   assert.deepEqual(t3.settled, []);
+});
+
+test("messages sent in a burst, or while a run is busy, get one run and one reply", async () => {
+  const runs: string[][] = [];
+  const brain: Brain = {
+    name: "test",
+    async handle(event, tools) {
+      if (event.type !== "message") return "ignored";
+      runs.push(event.messages.map((m) => m.text));
+      await tools.reply({ text: `reply ${runs.length}` });
+      await new Promise((r) => setTimeout(r, 60)); // a slow run
+      return "replied";
+    },
+  };
+  const { gateway, worker } = setup({ brain, quietMs: 40 });
+  worker.enqueue(message({ eventKey: "a", text: "but CSS build bana kyun rahe ho?" }));
+  await new Promise((r) => setTimeout(r, 15));
+  worker.enqueue(message({ eventKey: "b", text: "hlw?" })); // within the pause: same run
+  await new Promise((r) => setTimeout(r, 70)); // the run has started
+  worker.enqueue(message({ eventKey: "c", text: "PR banao bas" }));
+  worker.enqueue(message({ eventKey: "d", text: "??" })); // both arrive while it's busy: one more run
+  await worker.idle();
+
+  assert.deepEqual(runs, [["but CSS build bana kyun rahe ho?", "hlw?"], ["PR banao bas", "??"]]);
+  assert.deepEqual(gateway.replies.map((r) => r.text), ["reply 1", "reply 2"]);
+  assert.deepEqual(gateway.acks, ["a", "b", "c", "d"]); // each message still gets its 👀
 });

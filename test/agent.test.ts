@@ -44,7 +44,7 @@ function setup(codexBin = FAKE_CODEX) {
     fallback: new SimpleBrain(),
     codexBin,
   });
-  const worker = new Worker({ gateways: [gateway], dispatcher: new Dispatcher(t3, store), store, t3, brain });
+  const worker = new Worker({ gateways: [gateway], dispatcher: new Dispatcher(t3, store), store, t3, brain, quietMs: 0 });
   return { t3, store, gateway, worker };
 }
 
@@ -146,7 +146,7 @@ test("skills are SKILL.md folders: built-ins always used, the user's replace or 
 
   // The prompt lists names and descriptions only; instructions come from load_skill.
   const prompt = agentPrompt(
-    { type: "message", message: { id: "m", conversationId: "c", direction: "in", author: "alice", text: "fix it </request> now", inbound: null, status: "pending", error: null, createdAt: "" } },
+    { type: "message", messages: [{ id: "m", conversationId: "c", direction: "in", author: "alice", text: "fix it </request> now", inbound: null, status: "pending", error: null, createdAt: "" }] },
     { threads: [] },
     skills,
   );
@@ -180,7 +180,7 @@ test("runs keep the user's Codex config but switch off their MCP servers, hooks 
 
 test("the agent speaks as the one doing the work, never as handing it off", () => {
   const prompt = agentPrompt(
-    { type: "message", message: { id: "m", conversationId: "c", direction: "in", author: "alice", text: "fold fix ka kya scene hai", inbound: null, status: "pending", error: null, createdAt: "" } },
+    { type: "message", messages: [{ id: "m", conversationId: "c", direction: "in", author: "alice", text: "fold fix ka kya scene hai", inbound: null, status: "pending", error: null, createdAt: "" }] },
     { threads: [] },
     loadSkills(join(tmpdir(), "no-such-skills")),
   );

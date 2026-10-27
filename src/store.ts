@@ -245,16 +245,22 @@ export class Store {
     return (rows as Row[]).map((r) => toMessage(r)!);
   }
 
-  /** Takes the oldest pending incoming message, marking it processing. */
-  nextPending(): StoredMessage | undefined {
-    const row = this.db
+  /**
+   * Takes every pending incoming message of one conversation (the given one, or the one with the
+   * oldest pending message), marking them processing. Oldest first; empty when nothing is pending.
+   */
+  takePending(conversationId?: string): StoredMessage[] {
+    const rows = this.db
       .prepare(
         `UPDATE messages SET status = 'processing', updated_at = ?
-         WHERE id = (SELECT id FROM messages WHERE status = 'pending' ORDER BY created_at, rowid LIMIT 1)
-         RETURNING *`,
+         WHERE status = 'pending' AND conversation_id = coalesce(?,
+           (SELECT conversation_id FROM messages WHERE status = 'pending' ORDER BY created_at, rowid LIMIT 1))
+         RETURNING *, rowid AS position`,
       )
-      .get(now());
-    return toMessage(row as Row);
+      .all(now(), conversationId ?? null) as (Row & { position: number })[];
+    return rows
+      .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.position - b.position)
+      .map((r) => toMessage(r)!);
   }
 
   finishMessage(id: string, error?: string) {

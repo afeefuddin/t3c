@@ -10,6 +10,10 @@ import { ConversationTools } from "./agent/tools.ts";
 const STALL_MS = 15 * 60_000;
 /** Waiting/failed/stuck episodes in a row (without progress) the brain gets before a person is told. */
 const MAX_ATTEMPTS = 3;
+/** People send one request in several messages: a run starts once a conversation is quiet this long… */
+const QUIET_MS = 4_000;
+/** …or after this long, if they keep typing. */
+const MAX_QUIET_WAIT_MS = 20_000;
 
 /**
  * Wakes the brain on events and keeps everything durable:
@@ -38,9 +42,11 @@ export class Worker {
   /** Per thread: waiting/failed/stuck episodes in a row without progress. */
   private readonly attempts = new Map<string, number>();
   private readonly stallMs: number;
+  private readonly quietMs: number;
 
-  constructor(deps: { gateways: Gateway[]; dispatcher: Dispatcher; store: Store; t3: T3; brain: Brain; stallMs?: number }) {
+  constructor(deps: { gateways: Gateway[]; dispatcher: Dispatcher; store: Store; t3: T3; brain: Brain; stallMs?: number; quietMs?: number }) {
     this.stallMs = deps.stallMs ?? STALL_MS;
+    this.quietMs = deps.quietMs ?? QUIET_MS;
     this.gateways = new Map(deps.gateways.map((g) => [g.name, g]));
     this.dispatcher = deps.dispatcher;
     this.store = deps.store;
@@ -100,23 +106,43 @@ export class Worker {
     this.draining ??= this.drain().finally(() => (this.draining = undefined));
   }
 
+  /** Handles waiting messages a conversation at a time: everything it has pending goes to one run. */
   private async drain() {
-    for (let message = this.store.nextPending(); message; message = this.store.nextPending()) {
-      const conversation = this.store.getConversation(message.conversationId)!;
+    for (let batch = this.store.takePending(); batch.length > 0; batch = this.store.takePending()) {
+      const conversation = this.store.getConversation(batch[0].conversationId)!;
       if (!this.gateways.has(conversation.source)) {
         // e.g. a gateway removed from the config while messages from it were queued.
-        log("t3c", `skipping a message from "${conversation.source}": that gateway isn't configured`, "warn");
-        this.store.finishMessage(message.id, `No gateway "${conversation.source}" is configured.`);
+        log("t3c", `skipping ${batch.length} message(s) from "${conversation.source}": that gateway isn't configured`, "warn");
+        for (const m of batch) this.store.finishMessage(m.id, `No gateway "${conversation.source}" is configured.`);
         continue;
       }
+      const gateway = this.gateway(conversation.source);
       const error = await this.locked(conversation.id, async () => {
         this.store.updateConversation(conversation.id, { state: "active" });
-        const gateway = this.gateway(conversation.source);
-        await gateway.acknowledge?.(message.inbound!).catch((e) => log(gateway.name, `couldn't react: ${errorMessage(e)}`, "warn"));
-        return this.run(conversation, { type: "message", message });
+        await this.untilQuiet(conversation.id, batch, (m) => this.acknowledge(gateway, m));
+        return this.run(conversation, { type: "message", messages: batch });
       });
-      this.store.finishMessage(message.id, error);
+      for (const m of batch) this.store.finishMessage(m.id, error);
     }
+  }
+
+  /** Waits for a pause in the conversation, adding messages that arrive meanwhile to `batch`. */
+  private async untilQuiet(conversationId: string, batch: StoredMessage[], acknowledge: (m: StoredMessage) => Promise<void>) {
+    await Promise.all(batch.map(acknowledge));
+    const deadline = Date.now() + MAX_QUIET_WAIT_MS;
+    for (;;) {
+      const wait = Math.min(this.quietMs - (Date.now() - Date.parse(batch.at(-1)!.createdAt)), deadline - Date.now());
+      if (wait <= 0) return;
+      await new Promise((r) => setTimeout(r, wait));
+      const more = this.store.takePending(conversationId);
+      await Promise.all(more.map(acknowledge));
+      batch.push(...more);
+    }
+  }
+
+  /** Signals that a message was seen, e.g. a 👀 reaction. Best effort. */
+  private async acknowledge(gateway: Gateway, message: StoredMessage) {
+    await gateway.acknowledge?.(message.inbound!).catch((e) => log(gateway.name, `couldn't react: ${errorMessage(e)}`, "warn"));
   }
 
   /** One brain run with conversation-scoped tools, recorded in agent_runs. Returns an error message, if any. */

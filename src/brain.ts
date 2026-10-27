@@ -5,7 +5,8 @@ import type { ConversationTools } from "./agent/tools.ts";
 
 /** Why the agent woke up. */
 export type AgentEvent =
-  | { type: "message"; message: StoredMessage }
+  /** Everything the person sent since the last run, oldest first: often one request in pieces. */
+  | { type: "message"; messages: StoredMessage[] }
   /** `attempt` counts this thread's waiting/failed/stuck episodes in a row without progress. */
   | { type: "thread_finished"; thread: ThreadRecord; reply: ThreadReply; attempt: number }
   | { type: "thread_stalled"; thread: ThreadRecord; reply: ThreadReply; idleMinutes: number; attempt: number };
@@ -57,7 +58,7 @@ export class SimpleBrain implements Brain {
     const threads = tools.launchedThreads();
     if (threads.length > 0) {
       const latest = threads.at(-1)!;
-      await tools.sendToThread({ label: latest.label, text: event.message.text });
+      await tools.sendToThread({ label: latest.label, text: event.messages.map((m) => m.text).join("\n\n") });
       if (tools.canReply) await tools.reply({ text: "Got it, on it 👍" });
       return `sent the follow-up to "${latest.label}"`;
     }
@@ -65,11 +66,11 @@ export class SimpleBrain implements Brain {
     // Never asks: `in:<project>`, else a project the message names, else the first allowed one.
     const projects = await tools.listProjects();
     if (projects.length === 0) throw new Error("No T3 project is allowed for this conversation.");
-    const text = event.message.text.toLowerCase();
+    const text = event.messages.map((m) => m.text).join("\n").toLowerCase();
     const named = /^in:(\S+)/i.exec(text)?.[1];
     const project =
       projects.find((p) => p.name.toLowerCase() === named) ?? projects.find((p) => text.includes(p.name.toLowerCase())) ?? projects[0];
-    const inbound = event.message.inbound!;
+    const inbound = event.messages[0].inbound!;
     await tools.startThread({ project: project.name, title: inbound.title });
     if (tools.canReply) await tools.reply({ text: "On it! I'll post here when it's done 👀" });
     return `started a thread in ${project.name}`;
