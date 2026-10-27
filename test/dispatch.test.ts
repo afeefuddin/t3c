@@ -93,3 +93,11 @@ test("rejects unknown projects without recording a thread", async () => {
   await assert.rejects(dispatcher.launch(conversation, request({ project: "nope" })), /Unknown T3 project/);
   assert.deepEqual(store.threads(conversation.id), []);
 });
+
+test("a configured model is passed to T3; otherwise the project's default applies", async () => {
+  const { t3, store, conversation } = setup();
+  await new Dispatcher(t3, store, { model: { provider: "claudeAgent", model: "claude-opus-5-5" } }).launch(conversation, request());
+  assert.deepEqual(t3.launches[0].modelSelection, { instanceId: "claudeAgent", model: "claude-opus-5-5" });
+  await new Dispatcher(t3, store).launch(conversation, request({ label: "other" }));
+  assert.equal("modelSelection" in t3.launches[1], false);
+});

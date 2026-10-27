@@ -12,7 +12,8 @@ Slack / GitHub ──HTTPS──▶ Tailscale Funnel ──▶ t3c (127.0.0.1) �
 
 ## Install
 
-Requires Node 24+, T3 Code running, and [Tailscale](https://tailscale.com) (for Slack and GitHub).
+Requires Node 24+, T3 Code running with its `t3` CLI, and [Tailscale](https://tailscale.com) (for Slack and
+GitHub).
 
 ```sh
 npm install -g github:afeefuddin/t3c   # private repo: needs your GitHub access
@@ -21,7 +22,7 @@ npm install -g github:afeefuddin/t3c   # private repo: needs your GitHub access
 ## Set up
 
 ```sh
-t3c login                     # approve t3c in T3 Code
+t3c login                     # connect to T3 Code and pick the model threads use
 t3c add slack                 # guided: creates the Slack app, picks a channel and project
 t3c add github owner/repo     # adds the webhook (uses your `gh` login)
 t3c start                     # runs in the background
@@ -32,6 +33,7 @@ Each `add` step can be run again later to add another channel or repository.
 | Command | |
 |---|---|
 | `t3c status` | what's running, connected and public |
+| `t3c model` | change the model T3 threads use |
 | `t3c logs -f` | follow what t3c is doing |
 | `t3c restart` | apply config changes |
 | `t3c stop` | stop t3c and turn Funnel off |
@@ -39,6 +41,9 @@ Each `add` step can be run again later to add another channel or repository.
 | `t3c add http` | an authenticated webhook for scripts and cron |
 
 Config is stored in `~/.t3c/config.json` (readable only by you).
+
+`t3c login` approves itself with a one-time pairing code from `t3 auth pairing create`, so no browser
+is needed. T3's tokens last 30 days, and t3c logs in again the same way before its token expires.
 
 ## Using it
 

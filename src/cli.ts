@@ -1,12 +1,12 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { CodexBrain } from "./agent/codex.ts";
 import { AgentToolServer } from "./agent/mcp.ts";
 import { ensureSkills } from "./agent/skills.ts";
-import { isLoggedIn, login } from "./auth.ts";
-import { loadConfig, paths, saveConfig, t3McpUrl } from "./config.ts";
+import { isLoggedIn, t3Auth } from "./auth.ts";
+import { loadConfig, paths, saveConfig } from "./config.ts";
 import { type Brain, SimpleBrain } from "./brain.ts";
 import { describeGateways, logs, runningPid, start, status, stop } from "./daemon.ts";
 import { Dispatcher } from "./dispatch.ts";
@@ -16,7 +16,7 @@ import { httpGateway } from "./gateways/http.ts";
 import { SlackGateway } from "./gateways/slack.ts";
 import { color, errorMessage, log } from "./log.ts";
 import { createApp } from "./server.ts";
-import { addGithub, addHttp, addSlack, githubToken, remove } from "./setup.ts";
+import { addGithub, addHttp, addSlack, chooseModel, githubToken, remove } from "./setup.ts";
 import { Store } from "./store.ts";
 import { T3Client } from "./t3.ts";
 import { say } from "./ui.ts";
@@ -30,6 +30,7 @@ ${color("bold", "Set up")} (once, in this order)
   t3c add github <owner/repo>    let /t3c comments in a repo start work
   t3c add http                   an authenticated webhook for scripts
   t3c remove slack [channel-id] | github <owner/repo> | http
+  t3c model                      pick the model T3 threads use
   t3c agent codex [--model <m>]  let Codex decide (project, briefs, follow-ups)
   t3c agent off                  back to fixed rules
 
@@ -63,11 +64,9 @@ try {
   switch (values.help ? undefined : command) {
     case "login":
       say.step("Connect t3c to T3 Code");
-      await login(t3McpUrl(), paths.auth, (url) => {
-        say.info("Approve t3c in the browser window that opens. If none opens, visit:");
-        say.info(url.toString());
-        if (process.platform === "darwin") execFile("open", [url.toString()]);
-      });
+      say.info("Approving t3c with a one-time pairing code from the `t3` CLI…");
+      await t3Auth().login();
+      if (!loadConfig().model) await chooseModel();
       say.ok("Connected. Next: `t3c add slack` or `t3c add github <owner/repo>`.");
       break;
 
@@ -76,6 +75,10 @@ try {
       else if (rest[0] === "github") await addGithub(rest[1] ?? "");
       else if (rest[0] === "http") addHttp();
       else throw new Error("Usage: t3c add slack | github <owner/repo> | http");
+      break;
+
+    case "model":
+      await chooseModel();
       break;
 
     case "agent":
@@ -112,7 +115,7 @@ try {
       break;
 
     case "projects": {
-      const t3 = await T3Client.connect(t3McpUrl(), paths.auth);
+      const t3 = await T3Client.connect(t3Auth());
       for (const p of await t3.listProjects()) console.log(`${p.title.padEnd(24)} ${color("dim", p.workspaceRoot)}`);
       await t3.close();
       break;
@@ -121,7 +124,7 @@ try {
     case "run": {
       const prompt = rest.join(" ");
       if (!prompt || !values.project) throw new Error('Usage: t3c run "<prompt>" --project <project>');
-      const t3 = await T3Client.connect(t3McpUrl(), paths.auth);
+      const t3 = await T3Client.connect(t3Auth());
       const store = new Store(paths.state);
       const title = values.title ?? prompt.slice(0, 60);
       const message = store.enqueue({
@@ -134,7 +137,7 @@ try {
         projects: [values.project],
       })!;
       const conversation = store.getConversation(message.conversationId)!;
-      const result = await new Dispatcher(t3, store, loadConfig().runtimeMode).launch(conversation, {
+      const result = await new Dispatcher(t3, store, loadConfig()).launch(conversation, {
         label: "main",
         project: values.project,
         title,
@@ -174,7 +177,7 @@ async function serve() {
   if (config.runtimeMode === "full-access") {
     log("t3c", "runtimeMode is full-access: chat messages can run any command on this machine", "warn");
   }
-  const t3 = await T3Client.connect(t3McpUrl(), paths.auth);
+  const t3 = await T3Client.connect(t3Auth());
   const agentTools = new AgentToolServer();
   const simple = new SimpleBrain();
   const brain: Brain = config.agent
@@ -187,7 +190,7 @@ async function serve() {
         fallback: simple,
       })
     : simple;
-  const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store, config.runtimeMode), store, t3, brain });
+  const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store, config), store, t3, brain });
   worker.start();
 
   // Never bind publicly: the internet reaches t3c only through Tailscale Funnel, and only /hooks.

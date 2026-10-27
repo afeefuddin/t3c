@@ -1,9 +1,10 @@
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { loadConfig, paths, saveConfig, t3McpUrl } from "./config.ts";
+import { loadConfig, paths, saveConfig } from "./config.ts";
 import { connectRepo, githubApi } from "./gateways/github.ts";
 import { slackApi, slackManifest } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
+import { t3Auth } from "./auth.ts";
 import { T3Client } from "./t3.ts";
 import { funnelBaseUrl } from "./tailscale.ts";
 import { ask, choose, confirm, say } from "./ui.ts";
@@ -196,10 +197,24 @@ async function chooseProject(label: string): Promise<string> {
   );
 }
 
+/** Picks the model for the threads t3c starts, from the providers enabled in T3. */
+export async function chooseModel() {
+  const t3 = await T3Client.connect(t3Auth());
+  const models = await t3.listModels().finally(() => t3.close());
+  if (models.length === 0) throw new Error("No providers are enabled in T3 Code. Enable one in T3's settings first.");
+  const config = loadConfig();
+  const model = await choose(
+    "Which model should threads started by t3c use? (`t3c model` changes it later)",
+    models.map(({ label, ...value }) => ({ label: config.model?.model === value.model ? `${label} (current)` : label, value })),
+  );
+  saveConfig({ ...config, model });
+  say.ok(`Threads will use ${model.model}.`);
+}
+
 async function listProjectsQuietly(): Promise<{ id: string; title: string }[]> {
   let projects: { id: string; title: string }[] = [];
   try {
-    const t3 = await T3Client.connect(t3McpUrl(), paths.auth);
+    const t3 = await T3Client.connect(t3Auth());
     projects = await t3.listProjects();
     await t3.close();
   } catch (error) {

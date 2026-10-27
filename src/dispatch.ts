@@ -1,6 +1,6 @@
 import type { Worktree } from "./gateway.ts";
 import type { Conversation, Store, ThreadRecord } from "./store.ts";
-import type { Project, RuntimeMode, T3 } from "./t3.ts";
+import type { Project, RuntimeMode, T3, ThreadModel } from "./t3.ts";
 
 export interface LaunchRequest {
   /** Unique within the conversation; launching an existing label returns that thread instead. */
@@ -22,12 +22,17 @@ export class Dispatcher {
   private readonly t3: T3;
   private readonly store: Store;
   private readonly runtimeMode: RuntimeMode;
+  private readonly model?: ThreadModel;
 
-  /** `runtimeMode` caps what launched threads may do without approval in T3. */
-  constructor(t3: T3, store: Store, runtimeMode: RuntimeMode = "auto-accept-edits") {
+  /**
+   * `runtimeMode` caps what launched threads may do without approval in T3; `model` is used
+   * instead of the project's default model.
+   */
+  constructor(t3: T3, store: Store, { runtimeMode = "auto-accept-edits", model }: { runtimeMode?: RuntimeMode; model?: ThreadModel } = {}) {
     this.t3 = t3;
     this.store = store;
     this.runtimeMode = runtimeMode;
+    this.model = model;
   }
 
   async launch(conversation: Conversation, request: LaunchRequest): Promise<LaunchResult> {
@@ -50,6 +55,7 @@ export class Dispatcher {
         message: request.prompt,
         workspaceStrategy: request.worktree ? { type: "worktree", ...request.worktree } : { type: "root" },
         runtimeMode: this.runtimeMode,
+        ...(this.model && { modelSelection: { instanceId: this.model.provider, model: this.model.model } }),
       });
       this.store.markThreadLaunched(claimed.id, threadId);
     } catch (error) {

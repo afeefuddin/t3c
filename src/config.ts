@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { RuntimeMode } from "./t3.ts";
+import type { RuntimeMode, ThreadModel } from "./t3.ts";
 
 /** Everything t3c knows, in ~/.t3c/config.json (mode 0600: it holds tokens). Edited by `t3c add`/`remove`. */
 export interface Config {
@@ -9,6 +9,8 @@ export interface Config {
   port: number;
   /** What T3 threads started by t3c may do without approval in T3 Code. */
   runtimeMode: RuntimeMode;
+  /** Model for the threads t3c starts; the project's default in T3 when unset. */
+  model?: ThreadModel;
   slack?: {
     signingSecret: string;
     botToken: string;

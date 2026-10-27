@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { FileOAuthProvider } from "./auth.ts";
+import type { T3Auth } from "./auth.ts";
 
 export interface Project {
   id: string;
@@ -22,12 +22,20 @@ export type WorkspaceStrategy =
 export const RUNTIME_MODES = ["approval-required", "auto-accept-edits", "auto", "full-access"] as const;
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
+/** A T3 provider instance (e.g. "codex", "claudeAgent") and one of its models. */
+export interface ThreadModel {
+  provider: string;
+  model: string;
+}
+
 export interface LaunchInput {
   projectId: string;
   title: string;
   message: string;
   workspaceStrategy: WorkspaceStrategy;
   runtimeMode: RuntimeMode;
+  /** Needed when the project has no default model in T3. */
+  modelSelection?: { instanceId: string; model: string };
 }
 
 /** The slice of T3's orchestration tools the dispatcher needs. */
@@ -73,10 +81,8 @@ export class T3Client implements T3 {
     this.onClose = onClose;
   }
 
-  static async connect(serverUrl: string, authFile: string): Promise<T3Client> {
-    const transport = new StreamableHTTPClientTransport(new URL(serverUrl), {
-      authProvider: new FileOAuthProvider(authFile),
-    });
+  static async connect(auth: T3Auth): Promise<T3Client> {
+    const transport = new StreamableHTTPClientTransport(new URL(auth.serverUrl), { fetch: auth.fetch });
     const client = new Client({ name: "t3c", version: "0.1.0" });
     await client.connect(transport);
     return new T3Client(client, () => transport.close());
@@ -89,6 +95,16 @@ export class T3Client implements T3 {
   async listProjects() {
     const { projects } = await this.call<{ projects: Project[] }>("t3_project_list", { limit: 100 });
     return projects;
+  }
+
+  /** Models of the providers that are enabled in T3. */
+  async listModels(): Promise<(ThreadModel & { label: string })[]> {
+    const { providers } = await this.call<{
+      providers: { providerInstanceId: string; displayName: string; models: { id: string; label?: string }[]; constraints: string[] }[];
+    }>("orchestrator_capabilities", {});
+    return providers
+      .filter((p) => p.constraints.length === 0)
+      .flatMap((p) => p.models.map((m) => ({ provider: p.providerInstanceId, model: m.id, label: `${p.displayName}: ${m.label ?? m.id}` })));
   }
 
   async listThreads(projectId: string, titleContains: string) {

@@ -83,7 +83,7 @@ export async function status() {
   else say.warn("not running — `t3c start`");
   if (isLoggedIn(paths.auth)) say.ok(`connected to T3 Code at ${t3McpUrl()}`);
   else say.warn("not connected to T3 Code — `t3c login`");
-  say.info(`threads run as ${config.runtimeMode}; brain: ${config.agent ? `${config.agent.provider} (skills in ${paths.skills})` : "fixed rules"}`);
+  say.info(`threads run as ${config.runtimeMode} on ${config.model?.model ?? "each project's default model"}; brain: ${config.agent ? `${config.agent.provider} (skills in ${paths.skills})` : "fixed rules"}`);
 
   say.step("Gateways");
   for (const line of describeGateways(config)) say.info(line);
