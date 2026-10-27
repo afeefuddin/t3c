@@ -150,3 +150,13 @@ test("a queued message from a gateway that isn't configured is marked failed, no
   assert.equal(store.getMessage(orphan.id)?.status, "failed");
   assert.equal(t3.launches.length, 0);
 });
+
+test("recent and active messages span conversations, newest last", async () => {
+  const store = new Store(":memory:");
+  const a = store.enqueue(message({ eventKey: "a", conversationId: "c-a", text: "first" }))!;
+  store.finishMessage(a.id);
+  store.enqueue(message({ eventKey: "b", conversationId: "c-b", text: "second" }));
+  assert.deepEqual(store.recentMessages(5).map((m) => m.text), ["first", "second"]);
+  assert.deepEqual(store.recentMessages(1).map((m) => m.text), ["second"]);
+  assert.deepEqual(store.activeMessages().map((m) => m.text), ["second"]);
+});

@@ -14,7 +14,7 @@ import type { Gateway } from "./gateway.ts";
 import { GithubGateway } from "./gateways/github.ts";
 import { httpGateway } from "./gateways/http.ts";
 import { SlackGateway } from "./gateways/slack.ts";
-import { color, errorMessage, log } from "./log.ts";
+import { color, errorMessage, log, preview } from "./log.ts";
 import { createApp } from "./server.ts";
 import { addGithub, addHttp, addSlack, chooseModel, githubToken, remove } from "./setup.ts";
 import { Store } from "./store.ts";
@@ -38,6 +38,7 @@ ${color("bold", "Run")}
   t3c start | stop | restart     the background service
   t3c status                     what's running and connected
   t3c logs [-f]                  what it's doing
+  t3c messages [-n 20]           what's in progress, and the latest messages
 
 ${color("bold", "Other")}
   t3c projects                   list T3 projects
@@ -53,6 +54,7 @@ const { positionals, values } = parseArgs({
     title: { type: "string" },
     model: { type: "string" },
     follow: { type: "boolean", short: "f" },
+    limit: { type: "string", short: "n" },
     help: { type: "boolean", short: "h" },
   },
 });
@@ -106,6 +108,10 @@ try {
       await status();
       break;
 
+    case "messages":
+      showMessages(Number(values.limit ?? 20));
+      break;
+
     case "logs":
       logs(Boolean(values.follow));
       break;
@@ -156,6 +162,43 @@ try {
 } catch (error) {
   console.error(`${color("red", "✗")} ${errorMessage(error)}`);
   process.exitCode = 1;
+}
+
+/** `t3c messages`: work in progress, then the latest messages in both directions. */
+function showMessages(limit: number) {
+  if (!Number.isInteger(limit) || limit < 1) throw new Error("Usage: t3c messages [-n <count>]");
+  const store = new Store(paths.state);
+  const where = (conversationId: string) => {
+    const c = store.getConversation(conversationId);
+    return c ? `${c.source} ${preview(c.externalId, 24)}` : conversationId;
+  };
+  const ago = (iso: string) => {
+    const minutes = Math.round((Date.now() - Date.parse(iso)) / 60_000);
+    return minutes < 60 ? `${minutes}m` : `${Math.round(minutes / 60)}h`;
+  };
+
+  say.step("In progress");
+  const active = store.activeMessages();
+  const owed = store.awaitingThreads();
+  for (const m of active) {
+    say.info(`${color("yellow", m.status.padEnd(10))} ${where(m.conversationId)}  ${m.author}: ${preview(m.text, 60)}`);
+  }
+  for (const t of owed) {
+    say.info(`${color("yellow", "working".padEnd(10))} ${where(t.conversationId)}  T3 thread "${t.title}" for ${ago(t.awaitingSince!)}`);
+  }
+  if (active.length + owed.length === 0) say.info(color("dim", "nothing — every message has been handled"));
+
+  say.step(`Latest ${limit} messages`);
+  const messages = store.recentMessages(limit);
+  if (messages.length === 0) say.info(color("dim", "none yet"));
+  for (const m of messages) {
+    const time = new Date(m.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    const arrow = m.direction === "in" ? color("cyan", "←") : color("green", "→");
+    const status = m.status.padEnd(10);
+    const state = m.status === "failed" ? color("red", status) : m.status === "pending" || m.status === "processing" ? color("yellow", status) : color("dim", status);
+    say.info(`${color("dim", time)} ${arrow} ${state} ${where(m.conversationId)}  ${m.direction === "in" ? `${m.author}: ` : ""}${preview(m.text, 70)}`);
+    if (m.error) say.info(`  ${color("red", preview(m.error, 100))}`);
+  }
 }
 
 /** The service itself; `t3c start` runs this in the background. */

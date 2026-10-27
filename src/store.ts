@@ -193,6 +193,18 @@ export class Store {
     return rows.reverse().map((r) => toMessage(r)!);
   }
 
+  /** The latest messages across all conversations, oldest first. */
+  recentMessages(limit: number): StoredMessage[] {
+    const rows = this.db.prepare("SELECT * FROM messages ORDER BY created_at DESC, rowid DESC LIMIT ?").all(limit) as Row[];
+    return rows.reverse().map((r) => toMessage(r)!);
+  }
+
+  /** Incoming messages not handled yet: queued or being handled right now. */
+  activeMessages(): StoredMessage[] {
+    const rows = this.db.prepare("SELECT * FROM messages WHERE status IN ('pending', 'processing') ORDER BY created_at, rowid").all();
+    return (rows as Row[]).map((r) => toMessage(r)!);
+  }
+
   /** Takes the oldest pending incoming message, marking it processing. */
   nextPending(): StoredMessage | undefined {
     const row = this.db

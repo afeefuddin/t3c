@@ -35,6 +35,7 @@ Each `add` step can be run again later to add another channel or repository.
 | `t3c status` | what's running, connected and public |
 | `t3c model` | change the model T3 threads use |
 | `t3c logs -f` | follow what t3c is doing |
+| `t3c messages [-n 20]` | what's in progress, and the latest messages in and out |
 | `t3c restart` | apply config changes |
 | `t3c stop` | stop t3c and turn Funnel off |
 | `t3c remove slack [channel-id]` / `github <owner/repo>` / `http` | disconnect |
