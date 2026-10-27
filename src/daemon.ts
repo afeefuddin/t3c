@@ -151,8 +151,7 @@ export function logs(follow: boolean) {
 export function describeGateways(config: Config): string[] {
   const lines: string[] = [];
   if (config.slack) {
-    const channels = Object.entries(config.slack.channels).map(([c, p]) => `${c}→${[p].flat().join("|")}`);
-    lines.push(`slack   ${channels.join(", ") || "no channels"}; ${config.slack.allowedUsers.length} allowed user(s)`);
+    lines.push(`slack   any channel or DM→${config.slack.projects.join("|")}; ${config.slack.allowedUsers.length} allowed user(s)`);
   }
   if (config.github) {
     const repos = Object.entries(config.github.repos).map(([r, p]) => `${r}→${p}`);

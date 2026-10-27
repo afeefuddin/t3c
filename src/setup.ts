@@ -2,7 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { loadConfig, paths, saveConfig } from "./config.ts";
 import { connectRepo, githubApi } from "./gateways/github.ts";
-import { ANY_CHANNEL, slackApi, slackManifest } from "./gateways/slack.ts";
+import { slackApi, slackManifest } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
 import { t3Auth } from "./auth.ts";
 import { T3Client } from "./t3.ts";
@@ -11,12 +11,22 @@ import { slackChallengeServer } from "./server.ts";
 import { disableFunnel, enableFunnel, funnelBaseUrl } from "./tailscale.ts";
 import { ask, choose, confirm, say } from "./ui.ts";
 
-/** `t3c add slack`: first run connects the workspace; later runs add channels. */
+/**
+ * `t3c add slack`: first run connects the workspace; later runs update the app's manifest and who
+ * may use it. The bot works in every channel it's invited to and in DMs, in the chosen projects.
+ */
 export async function addSlack() {
   const config = loadConfig();
   let slack = config.slack;
 
-  if (!slack || (await confirm("Slack is already connected. Reconnect the app (new tokens)?", false))) {
+  if (slack && !(await confirm("Slack is already connected. Reconnect the app (new tokens)?", false))) {
+    // Apps created from an older manifest lack newer features (DMs): bring it up to date.
+    const manifest = JSON.stringify(slackManifest(await publicUrl()), null, 2);
+    if (copy(manifest)) say.ok("Copied the current app manifest to your clipboard.");
+    else console.log(manifest);
+    say.info("To update the app (e.g. so people can DM it): api.slack.com/apps → your app → App Manifest →");
+    say.info("paste it (JSON tab) → Save, then reinstall the app if Slack asks.");
+  } else {
     const base = await publicUrl();
     say.step("1. Create the Slack app");
     const manifest = JSON.stringify(slackManifest(base), null, 2);
@@ -55,7 +65,7 @@ export async function addSlack() {
       default: slack?.signingSecret,
       validate: (s) => (/^[0-9a-f]{32}$/.test(s) ? undefined : "That doesn't look like a signing secret (32 hex characters)."),
     });
-    slack = { botToken, signingSecret, channels: slack?.channels ?? {}, allowedUsers: slack?.allowedUsers ?? [] };
+    slack = { botToken, signingSecret, projects: slack?.projects ?? ["*"], allowedUsers: slack?.allowedUsers ?? [] };
     saveConfig({ ...config, slack });
   }
 
@@ -76,35 +86,14 @@ export async function addSlack() {
   });
   slack.allowedUsers = split(users);
 
-  say.step("Connect a channel");
-  const everyChannel = { id: ANY_CHANNEL, name: "every channel the bot is invited to" };
-  let choices: { id: string; name: string }[] = [];
-  for (;;) {
-    const result = await api("users.conversations", { types: "public_channel,private_channel", limit: "200" });
-    choices = result.channels.filter((c: { id: string }) => !slack.channels[c.id]);
-    if (!slack.channels[ANY_CHANNEL]) choices.unshift(everyChannel);
-    if (choices.length > 0) break;
-    say.info("The bot isn't in any new channel yet. In Slack, open the channel and type: /invite @<your bot>");
-    await ask("Press Enter once it's invited", { default: "done" });
-  }
-  const channel = await choose(
-    "Which channel?",
-    choices.map((c) => ({ label: c === everyChannel ? `${c.name} (no setup per channel)` : `#${c.name}`, value: c })),
-  );
-  const where = channel === everyChannel ? channel.name : `#${channel.name}`;
-  const projects = await chooseProjects(`Which T3 projects may ${where} work on?`);
-  slack.channels[channel.id] = projects.length === 1 ? projects[0] : projects;
+  slack.projects = await chooseProjects("Which T3 projects may the bot work on?");
   saveConfig({ ...loadConfig(), slack });
 
-  say.ok(`${where} → ${projects.join(", ")}`);
-  if (projects.length > 1 || projects[0] === "*") {
+  say.ok(`Projects: ${slack.projects.join(", ")}`);
+  if (slack.projects.length > 1 || slack.projects[0] === "*") {
     say.hint(loadConfig().agent ? "Codex picks the project per request." : "Messages pick one with `in:<project>`, or turn on `t3c agent codex` to let Codex pick.");
   }
-  finish(
-    channel === everyChannel
-      ? "Invite the bot to any channel (/invite @<your bot>) and mention it there. Channels added separately keep their own projects."
-      : `Mention the bot in #${channel.name} to start a T3 thread. Run \`t3c add slack\` again to add more channels.`,
-  );
+  finish("Invite the bot to any channel (/invite @<your bot>) and mention it there, or DM it.");
 }
 
 /** `t3c add github owner/repo`: creates the webhook and maps the repo to a project. */
@@ -153,8 +142,8 @@ export function addHttp() {
 export async function remove(kind: string, target?: string) {
   const config = loadConfig();
   if (kind === "slack" && target) {
-    if (!config.slack?.channels[target]) throw new Error(`Channel ${target} isn't connected.`);
-    delete config.slack.channels[target];
+    // Channels used to be connected one by one; now the bot works wherever it's invited.
+    throw new Error("Channels aren't connected one by one any more: remove the bot from the channel in Slack instead.");
   } else if (kind === "slack") {
     delete config.slack;
     say.info("You can delete the app itself at https://api.slack.com/apps.");
@@ -167,7 +156,7 @@ export async function remove(kind: string, target?: string) {
   } else if (kind === "http") {
     delete config.http;
   } else {
-    throw new Error("Usage: t3c remove slack [channel-id] | github <owner/repo> | http");
+    throw new Error("Usage: t3c remove slack | github <owner/repo> | http");
   }
   saveConfig(config);
   finish(`Removed ${[kind, target].filter(Boolean).join(" ")}.`);
