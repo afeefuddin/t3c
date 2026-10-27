@@ -84,7 +84,7 @@ export class Dispatcher {
   /** Finds a thread created for this claim by a launch whose response was lost. */
   private async adopt(record: ThreadRecord): Promise<boolean> {
     try {
-      const threads = await this.t3.listThreads(record.projectId, record.title);
+      const threads = await this.t3.listThreads(record.projectId, { titleContains: record.title });
       const thread = threads.find((t) => t.title === record.title && t.createdAt >= record.updatedAt);
       if (!thread) return false;
       this.store.markThreadLaunched(record.id, thread.threadId);

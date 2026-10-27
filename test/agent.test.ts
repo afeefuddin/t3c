@@ -111,7 +111,7 @@ test("tool calls need the run's token, and stop working when the run ends", asyn
   const token = toolServer.open(tools);
   const client = await connect(token);
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ["fetch_source", "get_conversation", "interrupt_thread", "list_projects", "read_thread", "reply", "send_to_thread", "start_thread", "update_summary"]);
+  assert.deepEqual(names, ["fetch_source", "get_conversation", "inspect_thread", "interrupt_thread", "list_projects", "list_threads", "read_thread", "reply", "send_to_thread", "start_thread", "update_summary"]);
   await client.callTool({ name: "reply", arguments: { text: "hello" } });
   assert.deepEqual(gateway.replies, [{ conversationId: "conv-1", text: "hello" }]);
 
@@ -127,7 +127,7 @@ test("skills are written once, editable, and included in the prompt", () => {
   writeFileSync(join(dir, "follow-ups.md"), "# My follow-ups");
   ensureSkills(dir);
   const skills = loadSkills(dir);
-  assert.match(skills, /^# My follow-ups\n\n# Report a finished thread/);
+  assert.match(skills, /^# Check on running work[\s\S]*\n\n# My follow-ups\n\n# Report a finished thread/);
   assert.match(skills, /# New requests/);
   assert.match(skills, /# Write the thread prompt/);
   const prompt = agentPrompt(
@@ -136,7 +136,7 @@ test("skills are written once, editable, and included in the prompt", () => {
     skills,
   );
   assert.match(prompt, /<request>\nfix it <\\\/request> now\n<\/request>/);
-  assert.match(prompt, /# Skills\n# My follow-ups/);
+  assert.match(prompt, /# Skills\n# Check on running work/);
 });
 
 test("runs keep the user's Codex config but switch off their MCP servers, hooks and built-in tools", async () => {

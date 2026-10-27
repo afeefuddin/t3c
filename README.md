@@ -75,7 +75,9 @@ Events are a new message, or a T3 thread that finished.
   transcript, user IDs or mentions.
 - **Choosing threads:** it can start several threads (one per project) or ask which project
   you mean.
-- **Answering:** status questions get a short reply without disturbing the thread. When a thread
+- **Answering:** status questions get a short reply without disturbing the thread. It can also
+  look at every active thread in the projects the channel allows (including ones you started in
+  T3 Code), so "what's running?" or "is anyone on the login bug?" gets a one-line answer. When a thread
   finishes, it posts a short summary.
 - **Looking after threads:** finished threads are settled in T3. A thread that waits for input, fails,
   or makes no progress for 15 minutes is unblocked by the agent (it answers, redirects or restarts

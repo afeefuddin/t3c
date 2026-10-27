@@ -41,10 +41,12 @@ export interface LaunchInput {
 /** The slice of T3's orchestration tools the dispatcher needs. */
 export interface T3 {
   listProjects(): Promise<Project[]>;
-  listThreads(projectId: string, titleContains: string): Promise<ThreadSummary[]>;
+  /** Newest first. `settled: false` is T3's active list. */
+  listThreads(projectId: string, filter: { titleContains?: string; settled?: boolean }): Promise<ThreadSummary[]>;
   launchThread(input: LaunchInput): Promise<{ threadId: string }>;
   sendToThread(threadId: string, message: string): Promise<void>;
-  readThread(threadId: string): Promise<unknown>;
+  /** Status and the latest messages (the task, its answers and updates), oldest first. */
+  recentMessages(threadId: string): Promise<{ status: string; messages: { type: string; text: string | null }[] }>;
   /** Waits for a run that finished after `since` (ISO time) and returns its final answer. */
   waitForReply(threadId: string, since: string): Promise<ThreadReply>;
   /** The thread's current status and its latest run's last answer, without waiting. */
@@ -113,12 +115,8 @@ export class T3Client implements T3 {
       .flatMap((p) => p.models.map((m) => ({ provider: p.providerInstanceId, model: m.id, label: `${p.displayName}: ${m.label ?? m.id}` })));
   }
 
-  async listThreads(projectId: string, titleContains: string) {
-    const { threads } = await this.call<{ threads: ThreadSummary[] }>("t3_thread_list", {
-      projectId,
-      titleContains,
-      limit: 20,
-    });
+  async listThreads(projectId: string, filter: { titleContains?: string; settled?: boolean }) {
+    const { threads } = await this.call<{ threads: ThreadSummary[] }>("t3_thread_list", { projectId, ...filter, limit: 20 });
     return threads;
   }
 
@@ -151,8 +149,17 @@ export class T3Client implements T3 {
     await this.call("t3_thread_interrupt", { threadId, reason: reason.slice(0, 2000) });
   }
 
-  async readThread(threadId: string) {
-    return this.call("t3_thread_read", { threadId, limit: 10, maxCharsPerItem: 4000 });
+  async recentMessages(threadId: string) {
+    const { thread } = await this.call<ThreadState>("t3_thread_read", { threadId, limit: 1, maxCharsPerItem: 1 });
+    // Positions are thread-wide; tool calls between messages make up most of the tail.
+    const { items } = await this.call<ThreadState>("t3_thread_read", {
+      threadId,
+      view: "messages",
+      afterPosition: Math.max(0, thread.itemCount - 200),
+      limit: 100,
+      maxCharsPerItem: 1500,
+    });
+    return { status: thread.status, messages: items.slice(-6).map(({ type, text }) => ({ type, text })) };
   }
 
   async waitForReply(threadId: string, since: string, maxWaitMs = MAX_WAIT_MS): Promise<ThreadReply> {

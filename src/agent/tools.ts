@@ -29,6 +29,8 @@ export class ConversationTools {
   private replies = 0;
   private launches = 0;
   private preparation: Promise<Preparation> | undefined;
+  /** Threads list_threads showed this run, by T3 id: the only ones inspect_thread may read. */
+  private readonly listed = new Set<string>();
 
   constructor(ctx: ToolContext) {
     this.ctx = ctx;
@@ -74,7 +76,7 @@ export class ConversationTools {
 
   /** T3 projects this conversation may work in. */
   listProjects() {
-    return this.record("list_projects", {}, () => this.allowedProjects());
+    return this.record("list_projects", {}, async () => (await this.allowedProjects()).map((p) => ({ name: p.title, path: p.workspaceRoot })));
   }
 
   /** Status and latest answer of an attached thread. */
@@ -82,6 +84,33 @@ export class ConversationTools {
     return this.record("read_thread", input, async () => {
       const thread = this.thread(input.label);
       return { ...describeThread(thread), ...(thread.t3ThreadId ? await this.ctx.t3.latestReply(thread.t3ThreadId) : {}) };
+    });
+  }
+
+  /**
+   * Active T3 threads in the projects this conversation may work in, started anywhere (by people
+   * in T3 Code, or from other conversations), newest first. Read-only.
+   */
+  listThreads() {
+    return this.record("list_threads", {}, async () => {
+      const own = new Map(this.ctx.store.threads(this.ctx.conversation.id).map((t) => [t.t3ThreadId, t.label]));
+      const lists = await Promise.all(
+        (await this.allowedProjects()).map(async (p) =>
+          (await this.ctx.t3.listThreads(p.id, { settled: false })).map((t) => ({ ...t, project: p.title })),
+        ),
+      );
+      return lists.flat().map(({ threadId, title, status, createdAt, project }) => {
+        this.listed.add(threadId);
+        return { threadId, title, project, status, startedAt: createdAt, ...(own.has(threadId) ? { label: own.get(threadId) } : {}) };
+      });
+    });
+  }
+
+  /** Status and latest messages of a thread from list_threads, without disturbing it. */
+  inspectThread(input: { threadId: string }) {
+    return this.record("inspect_thread", input, async () => {
+      if (!this.listed.has(input.threadId)) throw new Error("Unknown thread. Use a threadId from list_threads.");
+      return this.ctx.t3.recentMessages(input.threadId);
     });
   }
 
@@ -94,11 +123,11 @@ export class ConversationTools {
     return this.record("start_thread", input, async () => {
       if (this.launches >= LIMITS.launches) throw new Error(`At most ${LIMITS.launches} threads per run.`);
       const projects = await this.allowedProjects();
-      const project = projects.find((p) => p.name.toLowerCase() === input.project.toLowerCase());
-      if (!project) throw new Error(`"${input.project}" isn't allowed here. Allowed: ${projects.map((p) => p.name).join(", ") || "none"}.`);
+      const project = projects.find((p) => p.title.toLowerCase() === input.project.toLowerCase());
+      if (!project) throw new Error(`"${input.project}" isn't allowed here. Allowed: ${projects.map((p) => p.title).join(", ") || "none"}.`);
 
       const { store, conversation, dispatcher } = this.ctx;
-      const label = input.label ?? (store.threads(conversation.id).length === 0 ? "main" : slug(project.name));
+      const label = input.label ?? (store.threads(conversation.id).length === 0 ? "main" : slug(project.title));
       const preparation = await this.prepare();
       const worktree =
         preparation.worktree?.branch && label !== "main"
@@ -108,7 +137,7 @@ export class ConversationTools {
       const sentAt = new Date().toISOString();
       const result = await dispatcher.launch(conversation, {
         label,
-        project: project.name,
+        project: project.title,
         title: input.title,
         prompt: input.prompt
           ? threadPrompt(input.prompt, { instructions: preparation.instructions })
@@ -119,7 +148,7 @@ export class ConversationTools {
       if (result.status === "launched") {
         this.launches++;
         store.setAwaiting(result.thread.id, sentAt);
-        log(conversation.source, `→ started T3 thread ${result.thread.t3ThreadId} in ${project.name} (${conversation.externalId})`, "ok");
+        log(conversation.source, `→ started T3 thread ${result.thread.t3ThreadId} in ${project.title} (${conversation.externalId})`, "ok");
       }
       return { ...describeThread(store.getThread(result.thread.id)!), alreadyExisted: result.status === "existing" };
     });
@@ -175,10 +204,9 @@ export class ConversationTools {
   private async allowedProjects() {
     const allowed = this.latestInbound().projects;
     const projects = await this.ctx.t3.listProjects();
-    const visible = allowed.includes("*")
+    return allowed.includes("*")
       ? projects
       : projects.filter((p) => allowed.some((a) => a === p.id || a.toLowerCase() === p.title.toLowerCase()));
-    return visible.map((p) => ({ name: p.title, path: p.workspaceRoot }));
   }
 
   private async post(text: string) {

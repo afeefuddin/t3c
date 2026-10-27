@@ -63,6 +63,32 @@ test("without the agent's prompt, the request goes in verbatim with the conversa
   assert.doesNotMatch(t3.launches[0].message, /alice/);
 });
 
+test("list_threads shows active threads in allowed projects only, and inspect_thread reads only those", async () => {
+  const { t3, tools } = setup(["demo"]);
+  const listed: unknown[] = [];
+  t3.listThreads = async (projectId, filter) => {
+    listed.push([projectId, filter]);
+    return [{ threadId: "x1", title: "Fix Safari header", status: "running", createdAt: "2026-10-27T10:00:00Z" }];
+  };
+
+  const run = tools();
+  await assert.rejects(run.inspectThread({ threadId: "x1" }), /Use a threadId from list_threads/);
+  assert.deepEqual(await run.listThreads(), [
+    { threadId: "x1", title: "Fix Safari header", project: "Demo", status: "running", startedAt: "2026-10-27T10:00:00Z" },
+  ]);
+  assert.deepEqual(listed, [["p1", { settled: false }]]);
+  assert.deepEqual(await run.inspectThread({ threadId: "x1" }), { status: "running", messages: [{ type: "assistant_message", text: "working on x1" }] });
+  await assert.rejects(run.inspectThread({ threadId: "elsewhere" }), /Use a threadId from list_threads/);
+});
+
+test("list_threads labels this conversation's own threads", async () => {
+  const { t3, store, conversation, tools } = setup(["demo"]);
+  await new Dispatcher(t3, store).launch(conversation, { label: "main", project: "demo", title: "Fix login", prompt: "p" });
+  const [thread] = await tools().listThreads();
+  assert.equal(thread.label, "main");
+  assert.equal(thread.threadId, store.findThread(conversation.id, "main")!.t3ThreadId);
+});
+
 test("threads can only be addressed within their own conversation", async () => {
   const { store, t3, tools } = setup();
   const other = store.enqueue(message({ conversationId: "conv-2", eventKey: "x" }))!;

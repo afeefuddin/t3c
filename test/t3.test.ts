@@ -63,3 +63,17 @@ test("waitForReply ignores a run that finished before the message was sent", asy
   assert.deepEqual(await client.waitForReply("t1", SENT), { status: "completed", text: "new" });
   assert.deepEqual(calls, ["t3_thread_read", "t3_thread_read", "t3_thread_wait", "t3_thread_read", "t3_thread_read"]);
 });
+
+test("recentMessages reads the tail of the thread's messages", async () => {
+  const calls: Record<string, unknown>[] = [];
+  const callTool = async ({ arguments: args }: { name: string; arguments?: Record<string, unknown> }) => {
+    calls.push(args!);
+    const items = Array.from({ length: 8 }, (_, i) => ({ type: i === 0 ? "user_message" : "assistant_message", runId: "r", text: `m${i}` }));
+    return { content: [{ type: "text", text: JSON.stringify({ thread: { status: "running", latestRunId: "r", itemCount: 250 }, recentRuns: [], items }) }] };
+  };
+  const result = await new T3Client({ callTool } as never).recentMessages("t1");
+  assert.equal(result.status, "running");
+  assert.deepEqual(result.messages.map((m) => m.text), ["m2", "m3", "m4", "m5", "m6", "m7"]);
+  assert.equal(calls[1].view, "messages");
+  assert.equal(calls[1].afterPosition, 50);
+});

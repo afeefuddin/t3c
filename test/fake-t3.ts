@@ -25,7 +25,7 @@ export class FakeT3 implements T3 {
   async listProjects() {
     return this.projects;
   }
-  async listThreads(_projectId: string, titleContains: string) {
+  async listThreads(_projectId: string, { titleContains = "" }: { titleContains?: string }) {
     return this.threads.filter((t) => t.title.includes(titleContains));
   }
   async launchThread(input: LaunchInput) {
@@ -39,8 +39,8 @@ export class FakeT3 implements T3 {
   async sendToThread(threadId: string, message: string) {
     this.sends.push({ threadId, message });
   }
-  async readThread() {
-    return {};
+  async recentMessages(threadId: string) {
+    return { status: "running", messages: [{ type: "assistant_message", text: `working on ${threadId}` }] };
   }
   async waitForReply(threadId: string, since: string): Promise<ThreadReply> {
     this.waits.push({ threadId, since });
