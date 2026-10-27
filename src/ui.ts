@@ -11,10 +11,15 @@ export const say = {
   hint: (text: string) => console.log(`  ${color("dim", text)}`),
 };
 
-let muted = false;
+/** While a secret is typed, the prompt it belongs to; readline redraws both on every keystroke. */
+let maskedPrompt: string | undefined;
+/** Terminal escape sequences pass through; every visible character of a secret shows as •. */
+const VISIBLE = /\x1b\[[0-9;?]*[A-Za-z]|[^\x00-\x1f\x7f]/g;
+const mask = (text: string) => text.replace(VISIBLE, (m) => (m.startsWith("\x1b") ? m : "•"));
 const output = new Writable({
   write(chunk, _encoding, done) {
-    if (!muted) process.stdout.write(chunk);
+    const text = chunk.toString();
+    process.stdout.write(maskedPrompt === undefined ? text : text.split(maskedPrompt).map(mask).join(maskedPrompt));
     done();
   },
 });
@@ -23,13 +28,11 @@ async function question(prompt: string, hidden = false): Promise<string> {
   if (!process.stdin.isTTY) throw new Error("This command is interactive; run it in a terminal.");
   const rl = createInterface({ input: process.stdin, output, terminal: true });
   try {
-    process.stdout.write(prompt);
-    muted = hidden;
-    const answer = await rl.question("");
+    if (hidden) maskedPrompt = prompt;
+    const answer = await rl.question(prompt);
     return answer.trim();
   } finally {
-    if (hidden) process.stdout.write("\n");
-    muted = false;
+    maskedPrompt = undefined;
     rl.close();
   }
 }
