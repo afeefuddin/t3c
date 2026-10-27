@@ -47,7 +47,8 @@ is needed. T3's tokens last 30 days, and t3c logs in again the same way before i
 
 ## Using it
 
-- **Slack:** `@t3bot fix the login redirect` in a connected channel starts a thread. Replies in the
+- **Slack:** `@t3bot fix the login redirect` in a connected channel starts a thread. Pick "every
+  channel the bot is invited to" in `t3c add slack` and inviting the bot is all a new channel needs. Replies in the
   Slack thread are sent to the same T3 thread. If you mention the bot inside an existing Slack
   thread, the earlier messages are included as context.
 - **GitHub:** `/t3c fix this` on an issue starts a thread on branch `t3c/issue-<n>`. On a pull

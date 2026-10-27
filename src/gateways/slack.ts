@@ -98,7 +98,7 @@ export class SlackGateway implements Gateway {
       log(this.name, `ignored ${event.user} in ${event.channel}: not on the allowlist`, "warn");
       return notice(`<@${event.user}> isn't allowed to use t3c.`);
     }
-    const projects = this.config.channels[event.channel];
+    const projects = this.config.channels[event.channel] ?? this.config.channels[ANY_CHANNEL];
     if (!projects) return notice("This channel isn't connected to a T3 project. Run `t3c add slack` to connect it.");
     const text = event.text.replaceAll(mention, "").trim();
     if (!text) return notice("What should I work on?");
@@ -138,6 +138,9 @@ export class SlackGateway implements Gateway {
 }
 
 /** A Slack app manifest for "Create an app → From a manifest", pointed at this machine's Funnel URL. */
+/** Channels key for every channel the bot is in that has no entry of its own. */
+export const ANY_CHANNEL = "*";
+
 export function slackManifest(publicUrl: string, name = "t3bot") {
   return {
     display_information: { name, description: "Starts T3 Code threads from Slack.", background_color: "#1f2328" },

@@ -14,7 +14,7 @@ export interface Config {
   slack?: {
     signingSecret: string;
     botToken: string;
-    /** Slack channel id → the T3 project(s) it may use; "*" means any. */
+    /** Slack channel id (or "*" for any channel the bot is in) → the T3 project(s) it may use; "*" means any project. */
     channels: Record<string, string | string[]>;
     /** Slack user ids allowed to use the bot. */
     allowedUsers: string[];

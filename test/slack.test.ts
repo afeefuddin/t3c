@@ -7,7 +7,7 @@ import { Store } from "../src/store.ts";
 const BOT = "UBOT";
 const SECRET = "slack-signing-secret";
 
-async function setup() {
+async function setup(channels: Record<string, string | string[]> = { C1: "demo", C2: ["demo", "web"] }) {
   const store = new Store(":memory:");
   const calls: { method: string; args: Record<string, string> }[] = [];
   const history: SlackEvent[] = [];
@@ -18,7 +18,7 @@ async function setup() {
     return {};
   };
   const gateway = new SlackGateway(
-    { signingSecret: SECRET, botToken: "xoxb", channels: { C1: "demo", C2: ["demo", "web"] }, allowedUsers: ["UALICE"] },
+    { signingSecret: SECRET, botToken: "xoxb", channels, allowedUsers: ["UALICE"] },
     { store, slack },
   );
   await gateway.init();
@@ -125,4 +125,10 @@ test("the manifest points Slack at this machine's hook", () => {
 
 test("converts common Markdown to Slack mrkdwn", () => {
   assert.equal(toSlackMarkdown("## Fixed\n**bold** and [PR](https://x.y/1)"), "*Fixed*\n*bold* and <https://x.y/1|PR>");
+});
+
+test('with "*", any channel the bot is in works, and channels of their own keep their projects', async () => {
+  const { gateway } = await setup({ "*": ["web"], C1: "demo" });
+  assert.deepEqual(gateway.receive(eventCallback({ channel: "CNEW" })).message?.projects, ["web"]);
+  assert.deepEqual(gateway.receive(eventCallback({ channel: "C1" }, "Ev2")).message?.projects, ["demo"]);
 });

@@ -2,7 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { loadConfig, paths, saveConfig } from "./config.ts";
 import { connectRepo, githubApi } from "./gateways/github.ts";
-import { slackApi, slackManifest } from "./gateways/slack.ts";
+import { ANY_CHANNEL, slackApi, slackManifest } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
 import { t3Auth } from "./auth.ts";
 import { T3Client } from "./t3.ts";
@@ -70,27 +70,34 @@ export async function addSlack() {
   slack.allowedUsers = split(users);
 
   say.step("Connect a channel");
-  let channels: { id: string; name: string }[] = [];
+  const everyChannel = { id: ANY_CHANNEL, name: "every channel the bot is invited to" };
+  let choices: { id: string; name: string }[] = [];
   for (;;) {
     const result = await api("users.conversations", { types: "public_channel,private_channel", limit: "200" });
-    channels = result.channels.filter((c: { id: string }) => !slack.channels[c.id]);
-    if (channels.length > 0) break;
-    say.info("The bot isn't in any new channel yet. In Slack, open the channel and type: /invite @t3bot");
+    choices = result.channels.filter((c: { id: string }) => !slack.channels[c.id]);
+    if (!slack.channels[ANY_CHANNEL]) choices.unshift(everyChannel);
+    if (choices.length > 0) break;
+    say.info("The bot isn't in any new channel yet. In Slack, open the channel and type: /invite @<your bot>");
     await ask("Press Enter once it's invited", { default: "done" });
   }
   const channel = await choose(
     "Which channel?",
-    channels.map((c) => ({ label: `#${c.name}`, value: c })),
+    choices.map((c) => ({ label: c === everyChannel ? `${c.name} (no setup per channel)` : `#${c.name}`, value: c })),
   );
-  const projects = await chooseProjects(`Which T3 projects may #${channel.name} work on?`);
+  const where = channel === everyChannel ? channel.name : `#${channel.name}`;
+  const projects = await chooseProjects(`Which T3 projects may ${where} work on?`);
   slack.channels[channel.id] = projects.length === 1 ? projects[0] : projects;
   saveConfig({ ...loadConfig(), slack });
 
-  say.ok(`#${channel.name} → ${projects.join(", ")}`);
+  say.ok(`${where} → ${projects.join(", ")}`);
   if (projects.length > 1 || projects[0] === "*") {
     say.hint(loadConfig().agent ? "Codex picks the project per request." : "Messages pick one with `in:<project>`, or turn on `t3c agent codex` to let Codex pick.");
   }
-  finish(`Mention @t3bot in #${channel.name} to start a T3 thread. Run \`t3c add slack\` again to add more channels.`);
+  finish(
+    channel === everyChannel
+      ? "Invite the bot to any channel (/invite @<your bot>) and mention it there. Channels added separately keep their own projects."
+      : `Mention the bot in #${channel.name} to start a T3 thread. Run \`t3c add slack\` again to add more channels.`,
+  );
   say.hint("First time? After `t3c start`, open the app's Event Subscriptions page and click Retry so Slack verifies the URL.");
 }
 
