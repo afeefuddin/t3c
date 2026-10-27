@@ -6,7 +6,9 @@ import { ANY_CHANNEL, slackApi, slackManifest } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
 import { t3Auth } from "./auth.ts";
 import { T3Client } from "./t3.ts";
-import { funnelBaseUrl } from "./tailscale.ts";
+import { runningPid } from "./daemon.ts";
+import { slackChallengeServer } from "./server.ts";
+import { disableFunnel, enableFunnel, funnelBaseUrl } from "./tailscale.ts";
 import { ask, choose, confirm, say } from "./ui.ts";
 
 /** `t3c add slack`: first run connects the workspace; later runs add channels. */
@@ -22,8 +24,13 @@ export async function addSlack() {
     else console.log(manifest);
     say.info("In the browser: Create New App → From a manifest → pick your workspace → paste the");
     say.info("manifest (JSON tab) → Create → Install to Workspace.");
+    const stopAnswering = await answerSlackUrlCheck(loadConfig().port);
     openUrl("https://api.slack.com/apps?new_app=1");
-    await ask("Press Enter when the app is installed", { default: "done" });
+    try {
+      await ask("Press Enter when the app is installed", { default: "done" });
+    } finally {
+      await stopAnswering();
+    }
 
     say.step("2. Paste its credentials");
     say.hint("OAuth & Permissions → Bot User OAuth Token");
@@ -98,7 +105,6 @@ export async function addSlack() {
       ? "Invite the bot to any channel (/invite @<your bot>) and mention it there. Channels added separately keep their own projects."
       : `Mention the bot in #${channel.name} to start a T3 thread. Run \`t3c add slack\` again to add more channels.`,
   );
-  say.hint("First time? After `t3c start`, open the app's Event Subscriptions page and click Retry so Slack verifies the URL.");
 }
 
 /** `t3c add github owner/repo`: creates the webhook and maps the repo to a project. */
@@ -216,6 +222,29 @@ export async function chooseModel() {
   );
   saveConfig({ ...config, model });
   say.ok(`Threads will use ${model.model}.`);
+}
+
+/**
+ * Slack verifies the manifest's Events URL as the app is created, before t3c has the app's
+ * tokens and can run. Until the app is installed, this answers that check (and nothing else).
+ */
+async function answerSlackUrlCheck(port: number): Promise<() => Promise<void>> {
+  // A running t3c answers the check itself.
+  if (runningPid()) return async () => {};
+  const server = slackChallengeServer();
+  try {
+    await new Promise<void>((resolve, reject) => server.once("error", reject).listen(port, "127.0.0.1", resolve));
+    await enableFunnel(port);
+  } catch (error) {
+    server.close();
+    say.warn(`Couldn't answer Slack's URL check (${errorMessage(error)}). If Slack says the URL isn't verified, save anyway and click Retry under Event Subscriptions after \`t3c start\`.`);
+    return async () => {};
+  }
+  say.hint("Answering Slack's URL check while you create the app.");
+  return async () => {
+    server.close();
+    await disableFunnel().catch(() => {});
+  };
 }
 
 async function listProjectsQuietly(): Promise<{ id: string; title: string }[]> {

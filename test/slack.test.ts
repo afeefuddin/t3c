@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
-import { type SlackEvent, SlackGateway, slackManifest, toSlackMarkdown } from "../src/gateways/slack.ts";
+import { type SlackEvent, SlackGateway, slackChallenge, slackManifest, toSlackMarkdown } from "../src/gateways/slack.ts";
 import { Store } from "../src/store.ts";
 
 const BOT = "UBOT";
@@ -42,7 +42,7 @@ const eventCallback = (event: Partial<SlackEvent>, eventId = "Ev1") =>
 
 test("rejects requests without a valid, fresh Slack signature", async () => {
   const { gateway } = await setup();
-  const payload = { type: "url_verification", challenge: "c" };
+  const payload = { type: "event_callback", event_id: "Ev9", event: { type: "app_mention", channel: "C1", ts: "1.1", user: "UALICE", text: "hi" } };
   assert.throws(() => gateway.receive(signed(payload, { secret: "wrong" })), { status: 401 });
   assert.throws(() => gateway.receive(signed(payload, { timestamp: Math.floor(Date.now() / 1000) - 600 })), { status: 401 });
   const tampered = signed(payload);
@@ -50,9 +50,12 @@ test("rejects requests without a valid, fresh Slack signature", async () => {
   assert.throws(() => gateway.receive({ headers: {}, body: Buffer.from("{}") }), { status: 401 });
 });
 
-test("answers Slack's URL verification challenge", async () => {
-  const { gateway } = await setup();
-  assert.deepEqual(gateway.receive(signed({ type: "url_verification", challenge: "abc" })), { response: { challenge: "abc" } });
+test("Slack's URL check is answered with only its own challenge", () => {
+  const body = (payload: unknown) => Buffer.from(JSON.stringify(payload));
+  assert.equal(slackChallenge(body({ type: "url_verification", challenge: "abc" })), "abc");
+  assert.equal(slackChallenge(body({ type: "event_callback", challenge: "abc" })), undefined);
+  assert.equal(slackChallenge(body({ type: "url_verification", challenge: "x".repeat(201) })), undefined);
+  assert.equal(slackChallenge(Buffer.from("not json")), undefined);
 });
 
 test("a mention becomes a message for the Slack thread", async () => {

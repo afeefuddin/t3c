@@ -64,7 +64,6 @@ export class SlackGateway implements Gateway {
   receive({ headers, body }: GatewayRequest): Received {
     this.verify(header(headers, "x-slack-request-timestamp"), header(headers, "x-slack-signature"), body);
     const payload = JSON.parse(body.toString("utf8"));
-    if (payload.type === "url_verification") return { response: { challenge: payload.challenge } };
     if (payload.type !== "event_callback") return {};
     const message = this.toMessage(payload.event_id, payload.event);
     return message ? { message } : {};
@@ -138,6 +137,20 @@ export class SlackGateway implements Gateway {
 }
 
 /** A Slack app manifest for "Create an app → From a manifest", pointed at this machine's Funnel URL. */
+/**
+ * Slack checks an Events URL by posting a random challenge and expecting it back, both when the
+ * app's manifest is saved and before t3c has the app's signing secret. Echoing it reveals nothing
+ * and starts nothing, so it's answered without a signature.
+ */
+export function slackChallenge(body: Buffer): string | undefined {
+  try {
+    const payload = JSON.parse(body.toString("utf8"));
+    if (payload?.type === "url_verification" && typeof payload.challenge === "string" && payload.challenge.length <= 200) {
+      return payload.challenge;
+    }
+  } catch {}
+}
+
 /** Channels key for every channel the bot is in that has no entry of its own. */
 export const ANY_CHANNEL = "*";
 

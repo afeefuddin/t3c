@@ -5,7 +5,7 @@ import { SimpleBrain } from "../src/brain.ts";
 import { Dispatcher } from "../src/dispatch.ts";
 import { type Gateway, GatewayError } from "../src/gateway.ts";
 import { httpGateway } from "../src/gateways/http.ts";
-import { createApp } from "../src/server.ts";
+import { createApp, slackChallengeServer } from "../src/server.ts";
 import { Store } from "../src/store.ts";
 import { Worker } from "../src/worker.ts";
 import { FakeT3 } from "./fake-t3.ts";
@@ -79,4 +79,22 @@ test("unknown routes and oversized bodies are refused", async () => {
 
 test("http gateway refuses weak secrets", () => {
   assert.throws(() => httpGateway("short"), /32/);
+});
+
+test("Slack's URL check is answered before Slack is set up, by t3c and by the setup-time server", async () => {
+  const check = (url: string) => fetch(url, { method: "POST", body: JSON.stringify({ type: "url_verification", challenge: "abc" }) });
+  assert.deepEqual(await (await check(`${base}/hooks/slack`)).json(), { challenge: "abc" });
+  // Anything else to an unconfigured gateway is still refused.
+  assert.equal((await post("/hooks/slack", { type: "event_callback" })).status, 404);
+
+  const setupServer = slackChallengeServer().listen(0, "127.0.0.1");
+  await new Promise((r) => setupServer.once("listening", r));
+  const setupBase = `http://127.0.0.1:${(setupServer.address() as AddressInfo).port}`;
+  try {
+    assert.deepEqual(await (await check(`${setupBase}/hooks/slack`)).json(), { challenge: "abc" });
+    assert.equal((await fetch(`${setupBase}/hooks/slack`, { method: "POST", body: "{}" })).status, 404);
+    assert.equal((await fetch(`${setupBase}/health`)).status, 404);
+  } finally {
+    setupServer.close();
+  }
 });
