@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { Dispatcher } from "../dispatch.ts";
-import type { Gateway, InboundMessage, Preparation } from "../gateway.ts";
+import type { Gateway, InboundMessage, Preparation, Worktree } from "../gateway.ts";
 import { log } from "../log.ts";
 import type { AgentRun, Conversation, Store, ThreadRecord } from "../store.ts";
 import type { T3 } from "../t3.ts";
@@ -140,7 +142,7 @@ export class ConversationTools {
    * conversation. Without one (fixed rules), the request goes in word for word with the
    * conversation fenced off as untrusted. Its answer will come back as an event.
    */
-  startThread(input: { project: string; title: string; prompt?: string; label?: string }) {
+  startThread(input: { project: string; title: string; prompt?: string; label?: string; worktree?: boolean }) {
     return this.record("start_thread", input, async () => {
       if (this.launches >= LIMITS.launches) throw new Error(`At most ${LIMITS.launches} threads per run.`);
       const projects = await this.allowedProjects();
@@ -150,10 +152,14 @@ export class ConversationTools {
       const { store, conversation, dispatcher } = this.ctx;
       const label = input.label ?? (store.threads(conversation.id).length === 0 ? "main" : slug(project.title));
       const preparation = await this.prepare();
-      const worktree =
-        preparation.worktree?.branch && label !== "main"
+      // The gateway's worktree (GitHub issues and PRs) wins; otherwise one on request, else the checkout.
+      const worktree = preparation.worktree
+        ? preparation.worktree.branch && label !== "main"
           ? { ...preparation.worktree, branch: `${preparation.worktree.branch}-${slug(label)}` }
-          : preparation.worktree;
+          : preparation.worktree
+        : input.worktree
+          ? await newWorktree(project.workspaceRoot, `t3c/${slug(input.title).slice(0, 40)}-${conversation.id.slice(0, 6)}`)
+          : undefined;
 
       const sentAt = new Date().toISOString();
       const result = await dispatcher.launch(conversation, {
@@ -301,6 +307,21 @@ function describeThread(t: ThreadRecord) {
     waitingForAnswer: t.awaitingSince !== null,
     error: t.error,
   };
+}
+
+/** A fresh worktree on `branch`, from the latest default branch on origin (or the current one). */
+async function newWorktree(root: string, branch: string): Promise<Worktree> {
+  const git = async (...args: string[]) => (await promisify(execFile)("git", ["-C", root, ...args])).stdout.trim();
+  try {
+    return { baseRef: (await git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")).replace(/^origin\//, ""), branch, startFromOrigin: true };
+  } catch {
+    // No origin/HEAD (no remote, or never fetched): branch off what's checked out.
+  }
+  try {
+    return { baseRef: await git("rev-parse", "--abbrev-ref", "HEAD"), branch };
+  } catch {
+    throw new Error(`${root} isn't a git repository, so its threads can't get a worktree. Start it without one.`);
+  }
 }
 
 function slug(text: string) {

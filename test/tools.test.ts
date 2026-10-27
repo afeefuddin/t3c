@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describeReply, threadPrompt } from "../src/agent/prompts.ts";
 import { ConversationTools, LIMITS } from "../src/agent/tools.ts";
 import { Dispatcher } from "../src/dispatch.ts";
@@ -177,4 +181,32 @@ test("the fixed rules post a thread's answer cut to fit, at a sentence end", () 
   assert.ok(short.length <= LIMITS.replyChars);
   assert.match(short, /production\. \(more in T3 Code\)$/);
   assert.equal(describeReply({ status: "completed", text: "Shipped." }), "Shipped.");
+});
+
+test("start_thread runs in its own worktree when asked, from the default branch, else in the checkout", async () => {
+  const { t3, gateway, tools } = setup(["*"]);
+  gateway.preparation = {}; // Slack: no worktree from the gateway
+  // A repo whose origin's default branch is "trunk", checked out on another branch.
+  const origin = mkdtempSync(join(tmpdir(), "t3c-origin-"));
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { stdio: "pipe" });
+  git(origin, "init", "-q", "-b", "trunk");
+  git(origin, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init");
+  const repo = mkdtempSync(join(tmpdir(), "t3c-repo-"));
+  execFileSync("git", ["clone", "-q", origin, repo], { stdio: "pipe" });
+  git(repo, "checkout", "-q", "-b", "my-feature");
+  t3.projects[0].workspaceRoot = repo;
+
+  const run = tools();
+  await run.startThread({ project: "Demo", title: "Fix live chat reply UI", worktree: true, label: "ui" });
+  await run.startThread({ project: "Demo", title: "Count open PRs", label: "count" });
+  const [inWorktree, inCheckout] = t3.launches.map((l) => l.workspaceStrategy);
+  assert.equal(inWorktree.type, "worktree");
+  assert.ok(inWorktree.type === "worktree" && inWorktree.baseRef === "trunk" && inWorktree.startFromOrigin);
+  assert.match(inWorktree.type === "worktree" ? inWorktree.branch! : "", /^t3c\/fix-live-chat-reply-ui-[0-9a-f-]{6}$/);
+  assert.deepEqual(inCheckout, { type: "root" });
+
+  // Not a git repository: a clear error, and nothing launched.
+  t3.projects[1].workspaceRoot = mkdtempSync(join(tmpdir(), "t3c-plain-"));
+  await assert.rejects(run.startThread({ project: "Web", title: "x", worktree: true, label: "w" }), /isn't a git repository/);
+  assert.equal(t3.launches.length, 2);
 });

@@ -98,6 +98,10 @@ function buildServer(tools: ConversationTools, skills: Skill[]) {
       title: z.string().max(80).describe("Short title: what will change"),
       prompt: z.string().min(1).max(20_000).describe('The task for the coding agent, self-contained (see "Write the thread prompt")'),
       label: z.string().max(40).optional().describe('Name for this thread within the conversation; defaults to "main" for the first'),
+      worktree: z
+        .boolean()
+        .optional()
+        .describe("Run it in its own git worktree on a new branch, from the latest default branch. Only when the request asks for a worktree or a separate branch."),
     },
     (i) => tools.startThread(i),
   );

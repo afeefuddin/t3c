@@ -73,6 +73,9 @@ Events are a new message, or a T3 thread that finished.
 - **Starting work:** it reads the Slack thread or issue, picks the project, and writes the
   thread a self-contained prompt: the task, what's known, links, and what done means. No chat
   transcript, user IDs or mentions.
+- **Worktrees:** ask for one ("do it in a new worktree") and the thread gets its own checkout on a
+  new `t3c/…` branch from the latest default branch; otherwise it runs in the project's folder.
+  GitHub issues and PRs always get their own worktree.
 - **Choosing threads:** it can start several threads (one per project). When it's unclear which
   project you mean, it picks the likeliest and says so.
 - **Answering:** status questions get a short reply without disturbing the thread. It can also

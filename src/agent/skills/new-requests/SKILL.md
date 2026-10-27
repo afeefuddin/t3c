@@ -15,7 +15,8 @@ description: Starts work on a new request: picks the project, starts a T3 thread
    error messages, links. If two fit about equally or none clearly does, pick the most likely one
    and say so in the thread prompt. Never ask which one.
 3. `start_thread` with a short title (what will change, under 60 characters) and a prompt (load
-   the `write-thread-prompt` skill).
+   the `write-thread-prompt` skill). If the request asks for a new worktree or a separate branch
+   ("do it in a worktree", "naye branch pe"), add `worktree: true`; otherwise leave it out.
 4. `reply` with a one-line, friendly acknowledgement of what you're on, and any assumption.
 
 A request that spans projects ("update the API and the web client") gets one thread per project,
