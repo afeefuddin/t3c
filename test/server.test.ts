@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { after, test } from "node:test";
 import { SimpleBrain } from "../src/brain.ts";
 import { Dispatcher } from "../src/dispatch.ts";
-import { type Gateway, GatewayError } from "../src/gateway.ts";
+import { type Gateway, GatewayError, PROBE_USER_AGENT } from "../src/gateway.ts";
 import { httpGateway } from "../src/gateways/http.ts";
 import { createApp, slackChallengeServer } from "../src/server.ts";
 import { Store } from "../src/store.ts";
@@ -97,4 +97,9 @@ test("Slack's URL check is answered before Slack is set up, by t3c and by the se
   } finally {
     setupServer.close();
   }
+});
+
+test("t3c status's probe is refused like any unsigned request", async () => {
+  const response = await fetch(`${base}/hooks/strict`, { method: "POST", headers: { "user-agent": PROBE_USER_AGENT } });
+  assert.equal(response.status, 401);
 });

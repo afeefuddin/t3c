@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AgentToolServer } from "./agent/mcp.ts";
-import { type Gateway, GatewayError, header, safeEqual } from "./gateway.ts";
+import { type Gateway, GatewayError, header, PROBE_USER_AGENT, safeEqual } from "./gateway.ts";
 import { slackChallenge } from "./gateways/slack.ts";
 import { errorMessage, log } from "./log.ts";
 import type { Store } from "./store.ts";
@@ -75,7 +75,7 @@ export function createApp({ gateways, worker, store, secret, agentTools }: Serve
       send(res, 404, { error: "Not found." });
     } catch (error) {
       if (error instanceof GatewayError) {
-        log("http", `✗ ${req.method} ${req.url} rejected: ${error.message}`, "warn");
+        if (header(req.headers, "user-agent") !== PROBE_USER_AGENT) log("http", `✗ ${req.method} ${req.url} rejected: ${error.message}`, "warn");
         return send(res, error.status, { error: error.message });
       }
       // Callers may be on the internet: log the details, return nothing internal.

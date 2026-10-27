@@ -1,6 +1,6 @@
 import type { Config } from "../config.ts";
 import { errorMessage, log } from "../log.ts";
-import { type Gateway, GatewayError, type GatewayRequest, header, hmacSha256Hex, type InboundMessage, type Received, safeEqual } from "../gateway.ts";
+import { type Gateway, GatewayError, type GatewayRequest, header, hmacSha256Hex, type InboundMessage, PROBE_USER_AGENT, type Received, safeEqual } from "../gateway.ts";
 import type { Store } from "../store.ts";
 
 export type SlackConfig = NonNullable<Config["slack"]>;
@@ -144,7 +144,7 @@ export class SlackGateway implements Gateway {
     if (!timestamp || !(Math.abs(age) <= MAX_REQUEST_AGE_S)) {
       // What Slack sent, so a rejection can be explained (catch-up recovers the message itself).
       const retry = header(headers, "x-slack-retry-num");
-      log(
+      if (header(headers, "user-agent") !== PROBE_USER_AGENT) log(
         this.name,
         `rejected a webhook: timestamp ${timestamp ? `"${timestamp}" (${age}s old)` : "missing"}${retry ? `, retry ${retry} (${header(headers, "x-slack-retry-reason") || "no reason"})` : ""}, from ${header(headers, "user-agent") || "no user agent"}`,
         "warn",

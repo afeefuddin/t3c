@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isLoggedIn, t3Auth } from "./auth.ts";
 import { type Config, home, loadConfig, needsFunnel, paths, t3McpUrl } from "./config.ts";
+import { PROBE_USER_AGENT } from "./gateway.ts";
 import { githubApi } from "./gateways/github.ts";
 import { slackApi } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
@@ -117,7 +118,7 @@ export async function status() {
       // An unsigned request must reach t3c through Funnel and be refused by it.
       const hook = `${base}/hooks/${config.slack ? "slack" : "github"}`;
       await check(`Public URL ${base}/hooks`, async () => {
-        const response = await fetch(hook, { method: "POST", signal: AbortSignal.timeout(10_000) });
+        const response = await fetch(hook, { method: "POST", headers: { "user-agent": PROBE_USER_AGENT }, signal: AbortSignal.timeout(10_000) });
         if (response.status !== 401) throw new Error(`expected t3c to refuse an unsigned request, got ${response.status}`);
         return "reachable from the internet";
       });

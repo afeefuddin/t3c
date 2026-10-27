@@ -82,6 +82,12 @@ export class GatewayError extends Error {
   }
 }
 
+/**
+ * User agent of `t3c status`'s reachability check: an unsigned request it expects to be refused.
+ * The refusal is the expected answer, so it isn't logged (the agent string is only a log hint).
+ */
+export const PROBE_USER_AGENT = "t3c-status-probe";
+
 /** Constant-time string comparison for secrets. */
 export function safeEqual(a: string, b: string) {
   const hash = (s: string) => createHash("sha256").update(s).digest();
