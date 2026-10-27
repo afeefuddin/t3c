@@ -4,7 +4,7 @@ import type { Gateway, InboundMessage } from "./gateway.ts";
 import { errorMessage, log, preview } from "./log.ts";
 import type { Conversation, Store, StoredMessage, ThreadRecord } from "./store.ts";
 import type { T3 } from "./t3.ts";
-import { ConversationTools } from "./tools.ts";
+import { ConversationTools } from "./agent/tools.ts";
 
 /**
  * Wakes the brain on events and keeps everything durable:

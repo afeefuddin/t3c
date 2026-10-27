@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { type AgentEvent, type Brain, SimpleBrain } from "../src/brain.ts";
 import { Dispatcher } from "../src/dispatch.ts";
 import { Store } from "../src/store.ts";
-import type { ConversationTools } from "../src/tools.ts";
+import type { ConversationTools } from "../src/agent/tools.ts";
 import { Worker } from "../src/worker.ts";
 import { FakeT3 } from "./fake-t3.ts";
 import { FakeGateway, message } from "./helpers.ts";

@@ -28,7 +28,7 @@ const call = async (name, input = {}) => {
 };
 
 let summary;
-if (prompt.includes("finished with status")) {
+if (prompt.includes("<thread-answer>")) {
   await call("reply", { text: "Fixed: the header no longer overlaps. PR is up." });
   summary = "summarized the answer";
 } else {
