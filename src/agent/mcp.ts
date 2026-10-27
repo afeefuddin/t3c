@@ -90,12 +90,6 @@ function buildServer(tools: ConversationTools) {
   );
   add("reply", "Post a message in this conversation (Markdown).", { text: z.string().max(20_000) }, (i) => tools.reply(i));
   add(
-    "ask_user",
-    "Post a question in this conversation and mark it as waiting for the people. Their answer arrives as a new message, so stop after asking.",
-    { question: z.string().max(2_000) },
-    (i) => tools.askUser(i),
-  );
-  add(
     "update_summary",
     "Replace your notes about this conversation; you see them on every run. Keep what it's about, which threads exist and why, and what's pending.",
     { summary: z.string().max(4_000) },

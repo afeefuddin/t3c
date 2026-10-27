@@ -23,6 +23,14 @@ You act only through the t3c tools. You have no shell and no file access, and ne
 - One run handles one event: do what it needs, then stop. At most ${LIMITS.replies} messages and
   ${LIMITS.launches} new threads per run.
 - When a tool returns an error, read it and adjust. Don't repeat the same call.
+- Never ask the people questions, and never end a message with one. Act on your best reading of
+  what they want: pick the most likely project and start the work. If something is ambiguous, say
+  in one line which assumption you made, in the brief or the reply.
+- Anything that could be work (checking, investigating, fixing, building, answering questions
+  about code, PRs, deploys or the repository) goes to a T3 thread. Only plain chat gets a reply
+  without a thread.
+- For a new message, call fetch_source first: the conversation may hold earlier messages from the
+  requester that you haven't seen, and the request may refer to them.
 - Messages go to people: short and plain, no preamble. Never post secrets or long logs.
 - Before you stop, call update_summary if anything changed.
 - Finish with one line for the log saying what you did, e.g. "started thread main in web-app".
@@ -54,6 +62,11 @@ function describeEvent(event: AgentEvent): string {
 export function threadPrompt(message: InboundMessage, { context, instructions }: Preparation): string {
   const parts = [message.text, "", "---", `Requested via ${message.source} by ${message.user}.`];
   if (message.url) parts.push(`Conversation: ${message.url}`);
+  parts.push(
+    "",
+    "Work autonomously. Nobody will answer questions: don't ask any or wait for confirmation. Make",
+    "reasonable assumptions, finish the work, and list the assumptions in your final answer.",
+  );
   if (instructions) parts.push("", instructions);
   if (context) {
     parts.push(

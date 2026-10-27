@@ -78,16 +78,14 @@ test("a follow-up during a pending answer is answered once, after the newer mess
   assert.ok(t3.waits[1].since > t3.waits[0].since);
 });
 
-test("with several allowed projects, the simple brain asks unless the message names one", async () => {
+test("with several allowed projects, the simple brain never asks: in:<project>, a named project, else the first", async () => {
   const { t3, gateway, worker } = setup();
-  worker.enqueue(message({ projects: ["demo", "web"] }));
+  worker.enqueue(message({ conversationId: "a", projects: ["demo", "web"], text: "in:web fix the header" }));
+  worker.enqueue(message({ conversationId: "b", eventKey: "e2", projects: ["demo", "web"], text: "the web header overlaps" }));
+  worker.enqueue(message({ conversationId: "c", eventKey: "e3", projects: ["demo", "web"], text: "fix the login bug" }));
   await worker.idle();
-  assert.equal(t3.launches.length, 0);
-  assert.match(gateway.replies[0].text, /Which project\? .*`Demo`, `Web`/);
-
-  worker.enqueue(message({ eventKey: "e2", projects: ["demo", "web"], text: "in:web fix the header" }));
-  await worker.idle();
-  assert.equal(t3.launches[0].projectId, "p2");
+  assert.deepEqual(t3.launches.map((l) => l.projectId), ["p2", "p2", "p1"]);
+  assert.ok(gateway.replies.every((r) => !r.text.includes("?")));
 });
 
 test("failures are reported back to the conversation and recorded", async () => {

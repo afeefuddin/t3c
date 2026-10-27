@@ -110,7 +110,7 @@ test("tool calls need the run's token, and stop working when the run ends", asyn
   const token = toolServer.open(tools);
   const client = await connect(token);
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ["ask_user", "fetch_source", "get_conversation", "list_projects", "read_thread", "reply", "send_to_thread", "start_thread", "update_summary"]);
+  assert.deepEqual(names, ["fetch_source", "get_conversation", "list_projects", "read_thread", "reply", "send_to_thread", "start_thread", "update_summary"]);
   await client.callTool({ name: "reply", arguments: { text: "hello" } });
   assert.deepEqual(gateway.replies, [{ conversationId: "conv-1", text: "hello" }]);
 

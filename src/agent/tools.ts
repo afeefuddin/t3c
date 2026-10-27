@@ -8,7 +8,7 @@ import { threadPrompt } from "./prompts.ts";
 /** Per-run caps, so a confused or manipulated run can't spam or fan out. */
 export const LIMITS = { replies: 3, launches: 3 };
 
-const ACTING_TOOLS = new Set(["start_thread", "send_to_thread", "reply", "ask_user"]);
+const ACTING_TOOLS = new Set(["start_thread", "send_to_thread", "reply"]);
 
 export interface ToolContext {
   store: Store;
@@ -133,15 +133,6 @@ export class ConversationTools {
   /** Posts into this conversation (Markdown). */
   reply(input: { text: string }) {
     return this.record("reply", input, () => this.post(input.text));
-  }
-
-  /** Asks the people in this conversation something and waits for their answer. */
-  askUser(input: { question: string }) {
-    return this.record("ask_user", input, async () => {
-      await this.post(input.question);
-      this.ctx.store.updateConversation(this.ctx.conversation.id, { state: "waiting_on_user" });
-      return { asked: true };
-    });
   }
 
   /** Replaces the agent's running notes about this conversation. */

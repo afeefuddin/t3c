@@ -38,14 +38,13 @@ export class SimpleBrain implements Brain {
       return `sent the follow-up to "${latest.label}"`;
     }
 
+    // Never asks: `in:<project>`, else a project the message names, else the first allowed one.
     const projects = await tools.listProjects();
-    const named = /^in:(\S+)/i.exec(event.message.text)?.[1];
-    const project = named ? projects.find((p) => p.name.toLowerCase() === named.toLowerCase()) : projects.length === 1 ? projects[0] : undefined;
-    if (!project) {
-      const names = projects.map((p) => `\`${p.name}\``).join(", ");
-      await tools.askUser({ question: `Which project? Start your message with \`in:<project>\`, one of: ${names || "(none available)"}.` });
-      return "asked which project";
-    }
+    if (projects.length === 0) throw new Error("No T3 project is allowed for this conversation.");
+    const text = event.message.text.toLowerCase();
+    const named = /^in:(\S+)/i.exec(text)?.[1];
+    const project =
+      projects.find((p) => p.name.toLowerCase() === named) ?? projects.find((p) => text.includes(p.name.toLowerCase())) ?? projects[0];
     const inbound = event.message.inbound!;
     await tools.startThread({ project: project.name, title: inbound.title });
     return `started a thread in ${project.name}`;

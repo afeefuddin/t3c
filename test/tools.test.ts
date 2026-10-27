@@ -66,7 +66,7 @@ test("replies, questions and launches are capped per run", async () => {
   const { gateway, store, conversation, tools } = setup(["*"]);
   const run = tools();
   for (let i = 0; i < LIMITS.replies; i++) await run.reply({ text: `r${i}` });
-  await assert.rejects(run.askUser({ question: "?" }), /At most 3 replies/);
+  await assert.rejects(run.reply({ text: "one more" }), /At most 3 replies/);
   assert.equal(gateway.replies.length, LIMITS.replies);
   assert.equal(store.messages(conversation.id).filter((m) => m.direction === "out").length, LIMITS.replies);
 
@@ -75,16 +75,10 @@ test("replies, questions and launches are capped per run", async () => {
   await assert.rejects(launches.startThread({ project: "Demo", title: "t", label: "extra" }), /At most 3 threads/);
 });
 
-test("ask_user marks the conversation as waiting; summaries are kept", async () => {
+test("summaries are kept", async () => {
   const { store, conversation, tools } = setup();
-  const run = tools();
-  await run.askUser({ question: "Which project?" });
-  await run.updateSummary({ summary: "Login bug on Safari." });
-  assert.deepEqual(
-    [store.getConversation(conversation.id)?.state, store.getConversation(conversation.id)?.summary],
-    ["waiting_on_user", "Login bug on Safari."],
-  );
-  assert.equal(run.acted, true);
+  await tools().updateSummary({ summary: "Login bug on Safari." });
+  assert.equal(store.getConversation(conversation.id)?.summary, "Login bug on Safari.");
 });
 
 test("untrusted context can't close its fence early", () => {

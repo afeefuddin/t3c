@@ -7,7 +7,7 @@ conversation. The brief is the summary it reads first, so it carries what matter
 - **Details**: repro steps, error messages, expected vs actual behaviour, constraints, decisions
   already made in the conversation.
 - **Links**: URLs mentioned in the conversation (issues, PRs, logs, designs).
-- **Open questions**, if any. The agent can't ask the people directly.
+- **Assumptions** you made where the request was ambiguous. Nobody will answer questions.
 
 Leave out greetings, chatter and anything unrelated. Don't repeat the request or copy the
 conversation; it's already included. Never include
