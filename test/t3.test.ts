@@ -5,7 +5,7 @@ import { T3Client } from "../src/t3.ts";
 const SENT = "2026-01-01T00:00:05.000Z";
 
 /** Answers MCP tool calls from a script of thread states, the way T3's server shapes them. */
-function fakeClient(statuses: string[], runCompletedAt = "2026-01-01T00:00:10.000Z") {
+function fakeClient(statuses: string[], runCompletedAt = "2026-01-01T00:00:10.000Z", pendingRequestCount = 0) {
   const calls: string[] = [];
   const callTool = async ({ name, arguments: args }: { name: string; arguments?: Record<string, unknown> }) => {
     calls.push(name);
@@ -13,7 +13,7 @@ function fakeClient(statuses: string[], runCompletedAt = "2026-01-01T00:00:10.00
     if (name === "t3_thread_read") {
       const status = args?.limit === 1 ? statuses.shift()! : "completed";
       body = {
-        thread: { status, latestRunId: "run2", itemCount: 12 },
+        thread: { status, latestRunId: "run2", itemCount: 12, pendingRequestCount },
         recentRuns: [{ runId: "run2", completedAt: status === "running" ? null : runCompletedAt }],
         items: [
           { type: "assistant_message", runId: "run1", text: "old answer" },
@@ -34,9 +34,15 @@ test("waitForReply waits while the thread works, then returns the latest run's l
   assert.deepEqual(calls, ["t3_thread_read", "t3_thread_wait", "t3_thread_read", "t3_thread_read"]);
 });
 
-test("waitForReply reports a thread waiting for user input", async () => {
+test("waitForReply reports a thread blocked on a question, with what it asked", async () => {
+  const { client } = fakeClient(["waiting"], undefined, 1);
+  assert.deepEqual(await client.waitForReply("t1", SENT), { status: "waiting", text: "final answer" });
+});
+
+test("waitForReply treats a thread idle-waiting for its next message after answering as completed", async () => {
+  // T3 shows "waiting" with nothing pending once a run is done and the thread awaits input.
   const { client } = fakeClient(["waiting"]);
-  assert.equal((await client.waitForReply("t1", SENT)).status, "waiting");
+  assert.deepEqual(await client.waitForReply("t1", SENT), { status: "completed", text: "final answer" });
 });
 
 test("waitForReply gives up after its deadline", async () => {

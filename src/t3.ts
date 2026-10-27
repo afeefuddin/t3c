@@ -69,7 +69,8 @@ export interface ThreadReply {
 }
 
 interface ThreadState {
-  thread: { status: string; latestRunId: string | null; itemCount: number };
+  /** `pendingRequestCount`: questions or approvals the thread is blocked on. */
+  thread: { status: string; latestRunId: string | null; itemCount: number; pendingRequestCount?: number };
   recentRuns: { runId: string; completedAt: string | null }[];
   items: { type: string; runId: string | null; text: string | null }[];
 }
@@ -168,12 +169,14 @@ export class T3Client implements T3 {
     const deadline = Date.now() + maxWaitMs;
     for (;;) {
       const { thread, recentRuns } = await this.call<ThreadState>("t3_thread_read", { threadId, limit: 1, maxCharsPerItem: 1 });
-      if (thread.status === "waiting") return { status: "waiting", text: null };
+      // Blocked on a question or approval: that's what it's waiting for.
+      if ((thread.pendingRequestCount ?? 0) > 0) return { status: "waiting", text: await this.lastAnswer(threadId, thread) };
       // A message sent with mode "auto" may start a new run or steer the active one; either way
       // its answer is a run that finished after it was sent. An earlier finish is a stale answer.
       const latest = recentRuns.find((r) => r.runId === thread.latestRunId);
       const answered = !WORKING.has(thread.status) && latest?.completedAt != null && latest.completedAt >= since;
-      if (answered) return { status: thread.status, text: await this.lastAnswer(threadId, thread) };
+      // "waiting" with nothing pending is T3 waiting for the next message: the run is done.
+      if (answered) return { status: thread.status === "waiting" ? "completed" : thread.status, text: await this.lastAnswer(threadId, thread) };
       if (Date.now() > deadline) return { status: "timed_out", text: null };
       if (WORKING.has(thread.status)) {
         await this.call("t3_thread_wait", { threadId, timeoutMs: WAIT_SLICE_MS });
