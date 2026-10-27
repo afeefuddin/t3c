@@ -66,6 +66,11 @@ export interface Gateway {
   acknowledge?(message: InboundMessage): Promise<void>;
   /** Posts text (Markdown) back into the conversation. */
   reply?(conversationId: string, text: string): Promise<void>;
+  /**
+   * Messages in followed conversations that never arrived as webhooks (a dropped delivery, or the
+   * machine was asleep). Must return each message under the same eventKey a webhook would use.
+   */
+  catchUp?(): Promise<InboundMessage[]>;
 }
 
 export class GatewayError extends Error {

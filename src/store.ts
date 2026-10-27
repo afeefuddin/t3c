@@ -132,6 +132,30 @@ export class Store {
     return toConversation(this.db.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as Row);
   }
 
+  /** A source's conversations with activity since `since` (ISO time), most recent first. */
+  recentConversations(source: string, since: string, limit: number): Conversation[] {
+    const rows = this.db
+      .prepare("SELECT * FROM conversations WHERE source = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?")
+      .all(source, since, limit);
+    return (rows as Row[]).map((r) => toConversation(r)!);
+  }
+
+  /** The first incoming message of a conversation. */
+  firstInbound(conversationId: string): StoredMessage | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM messages WHERE conversation_id = ? AND direction = 'in' ORDER BY created_at, rowid LIMIT 1")
+      .get(conversationId);
+    return toMessage(row as Row);
+  }
+
+  /** Whether an incoming message with this timestamp (its `meta.ts`, e.g. a Slack message's ts) is stored. */
+  hasInbound(conversationId: string, ts: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM messages WHERE conversation_id = ? AND direction = 'in' AND json_extract(inbound, '$.meta.ts') = ? LIMIT 1")
+      .get(conversationId, ts);
+    return Boolean(row);
+  }
+
   findConversation(source: string, externalId: string): Conversation | undefined {
     const row = this.db.prepare("SELECT * FROM conversations WHERE source = ? AND external_id = ?").get(source, externalId);
     return toConversation(row as Row);

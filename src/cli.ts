@@ -216,6 +216,9 @@ function showMessages(limit: number) {
   }
 }
 
+/** How often followed conversations are checked for messages that never arrived as webhooks. */
+const CATCH_UP_INTERVAL_MS = 20_000;
+
 /** The service itself; `t3c start` runs this in the background. */
 async function serve() {
   const config = loadConfig();
@@ -250,6 +253,9 @@ async function serve() {
     : simple;
   const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store, config), store, t3, brain });
   worker.start();
+  // Webhooks get lost sometimes, and none arrive while this machine sleeps.
+  void worker.catchUp();
+  setInterval(() => void worker.catchUp(), CATCH_UP_INTERVAL_MS);
 
   // Never bind publicly: the internet reaches t3c only through Tailscale Funnel, and only /hooks.
   const server = createApp({ gateways, worker, store, secret: config.http?.secret, agentTools });

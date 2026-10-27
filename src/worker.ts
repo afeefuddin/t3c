@@ -25,6 +25,7 @@ export class Worker {
   /** Threads with a watcher waiting for their answer. */
   private readonly watching = new Set<string>();
   private readonly pending = new Set<Promise<unknown>>();
+  private catchingUp = false;
 
   constructor(deps: { gateways: Gateway[]; dispatcher: Dispatcher; store: Store; t3: T3; brain: Brain }) {
     this.gateways = new Map(deps.gateways.map((g) => [g.name, g]));
@@ -41,6 +42,25 @@ export class Worker {
     if (owed.length > 0) log("t3c", `resuming ${owed.length} answer(s) still owed from before the restart`);
     for (const thread of owed) this.watch(thread);
     this.kick();
+  }
+
+  /** Asks each gateway for messages it missed, and handles them. Safe to call repeatedly. */
+  async catchUp() {
+    if (this.catchingUp) return;
+    this.catchingUp = true;
+    try {
+      for (const gateway of this.gateways.values()) {
+        try {
+          const missed = (await gateway.catchUp?.()) ?? [];
+          if (missed.length > 0) log(gateway.name, `caught up on ${missed.length} message(s) that never arrived as webhooks`);
+          for (const message of missed) this.enqueue(message);
+        } catch (error) {
+          log(gateway.name, `couldn't check for missed messages: ${errorMessage(error)}`, "warn");
+        }
+      }
+    } finally {
+      this.catchingUp = false;
+    }
   }
 
   /** Saves a message and schedules it. Returns undefined for a delivery seen before. */

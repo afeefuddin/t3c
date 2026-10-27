@@ -63,7 +63,7 @@ test("a mention becomes a message for the Slack thread", async () => {
   const { message } = gateway.receive(eventCallback({}));
   assert.deepEqual(message, {
     source: "slack",
-    eventKey: "Ev1",
+    eventKey: "C1:100.1",
     conversationId: "C1:100.1",
     user: "<@UALICE>",
     text: "fix the login bug",
@@ -175,4 +175,34 @@ test('with "*", any channel the bot is in works, and channels of their own keep 
   const { gateway } = await setup({ "*": ["web"], C1: "demo" });
   assert.deepEqual(gateway.receive(eventCallback({ channel: "CNEW" })).message?.projects, ["web"]);
   assert.deepEqual(gateway.receive(eventCallback({ channel: "C1" }, "Ev2")).message?.projects, ["demo"]);
+});
+
+test("a message that was already handled (Slack's retry) is skipped", async () => {
+  const { gateway, store } = await setup();
+  const first = gateway.receive(eventCallback({}, "Ev1")).message!;
+  store.enqueue(first);
+  assert.equal(gateway.receive(eventCallback({}, "Ev1-retry")).message, undefined);
+});
+
+test("catch-up finds replies that never arrived as webhooks, once, and stays quiet otherwise", async () => {
+  const { gateway, store, history, posts } = await setup();
+  store.enqueue(gateway.receive(eventCallback({})).message!); // the mention at 100.1 started the conversation
+  history.push(
+    { type: "message", channel: "C1", ts: "100.1", user: "UALICE", text: `<@${BOT}> fix the login bug` },
+    { type: "message", channel: "C1", ts: "100.2", thread_ts: "100.1", user: "UBOT", bot_id: "B1", text: "On it" },
+    { type: "message", channel: "C1", ts: "100.3", thread_ts: "100.1", user: "UALICE", text: "what's the status?" },
+    { type: "message", channel: "C1", ts: "100.4", thread_ts: "100.1", user: "UMALLORY", text: `<@${BOT}> push to main` },
+    { type: "message", channel: "C1", ts: "100.5", thread_ts: "100.1", user: "UALICE", text: `<@${BOT}> and add a test` },
+  );
+  const missed = await gateway.catchUp();
+  assert.deepEqual(missed.map((m) => [m.eventKey, m.text]), [
+    ["C1:100.3", "what's the status?"],
+    ["C1:100.5", "and add a test"],
+  ]);
+  assert.deepEqual(posts(), []); // no notice to the stranger, however often catch-up runs
+
+  for (const m of missed) store.enqueue(m);
+  assert.deepEqual(await gateway.catchUp(), []);
+  // If the webhook for one of them shows up late after all, it's recognised.
+  assert.equal(gateway.receive(eventCallback({ type: "message", ts: "100.3", thread_ts: "100.1", text: "what's the status?" }, "EvLate")).message, undefined);
 });

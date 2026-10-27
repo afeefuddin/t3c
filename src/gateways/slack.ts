@@ -17,6 +17,10 @@ export interface SlackEvent {
   text?: string;
 }
 
+/** Catch-up reads threads with activity in this window, at most this many. */
+const CATCH_UP_WINDOW_MS = 24 * 60 * 60_000;
+const CATCH_UP_THREADS = 10;
+
 /** Earlier thread messages passed along as context, at most. */
 const MAX_CONTEXT_MESSAGES = 300;
 
@@ -73,8 +77,31 @@ export class SlackGateway implements Gateway {
       const e = payload.event as SlackEvent;
       log(this.name, `debug: ${payload.event_id} ${e.type}${e.subtype ? `/${e.subtype}` : ""} in ${e.channel} from ${e.user ?? e.bot_id} thread=${e.thread_ts ?? "-"}`);
     }
-    const message = this.toMessage(payload.event_id, payload.event);
+    const message = this.toMessage(payload.event);
     return message ? { message } : {};
+  }
+
+  /**
+   * Replies in followed threads that Slack never delivered: Slack drops a webhook now and then,
+   * and none arrive while this machine is asleep. Reads the threads active in the last day.
+   */
+  async catchUp(): Promise<InboundMessage[]> {
+    const since = new Date(Date.now() - CATCH_UP_WINDOW_MS).toISOString();
+    const missed: InboundMessage[] = [];
+    for (const conversation of this.store.recentConversations(this.name, since, CATCH_UP_THREADS)) {
+      const [channel, root] = conversation.externalId.split(":");
+      // From the message that started the conversation: earlier chat in the thread isn't a request.
+      const first = this.store.firstInbound(conversation.id)?.inbound?.meta?.ts ?? root;
+      const { messages } = await this.slack("conversations.replies", { channel, ts: root, oldest: first, limit: "200" });
+      for (const m of messages as SlackEvent[]) {
+        if (Number(m.ts) <= Number(first)) continue;
+        // Replayed as the event Slack would have sent: a mention as app_mention, anything else as a reply.
+        const type = m.text?.includes(`<@${this.botUserId}>`) ? "app_mention" : "message";
+        const message = this.toMessage({ ...m, type, channel, thread_ts: m.thread_ts ?? root }, { quiet: true });
+        if (message) missed.push(message);
+      }
+    }
+    return missed;
   }
 
   /** https://api.slack.com/authentication/verifying-requests-from-slack */
@@ -85,24 +112,29 @@ export class SlackGateway implements Gateway {
     if (!safeEqual(signature, expected)) throw new GatewayError(401, "Invalid Slack signature.");
   }
 
-  private toMessage(eventId: string, event: SlackEvent): InboundMessage | undefined {
+  /** `quiet` (for catch-up) posts no notices and logs nothing, since it sees the same messages again. */
+  private toMessage(event: SlackEvent, { quiet = false } = {}): InboundMessage | undefined {
     if (event.type !== "app_mention" && event.type !== "message") return;
     if (event.bot_id || event.subtype || !event.user || !event.text) return;
 
     const mention = `<@${this.botUserId}>`;
     const rootTs = event.thread_ts ?? event.ts;
     const conversationId = `${event.channel}:${rootTs}`;
+    const conversation = this.store.findConversation(this.name, conversationId);
     if (event.type === "message") {
       // A mention arrives as both app_mention and message; app_mention handles it.
       // Plain messages only matter as replies in a Slack thread that already has a T3 thread.
-      if (event.text.includes(mention) || !event.thread_ts || !this.store.findConversation(this.name, conversationId)) return;
+      if (event.text.includes(mention) || !event.thread_ts || !conversation) return;
     }
+    // Slack's retries and catch-up can bring a message that was already handled.
+    if (conversation && this.store.hasInbound(conversation.id, event.ts)) return;
 
     const notice = (text: string): undefined => {
+      if (quiet) return;
       if (event.type === "app_mention") void this.post(event.channel, rootTs, text).catch((e) => log(this.name, `couldn't post a notice: ${errorMessage(e)}`, "warn"));
     };
     if (!this.config.allowedUsers.includes(event.user)) {
-      log(this.name, `ignored ${event.user} in ${event.channel}: not on the allowlist`, "warn");
+      if (!quiet) log(this.name, `ignored ${event.user} in ${event.channel}: not on the allowlist`, "warn");
       return notice(`<@${event.user}> isn't allowed to use t3c.`);
     }
     const projects = this.config.channels[event.channel] ?? this.config.channels[ANY_CHANNEL];
@@ -112,7 +144,8 @@ export class SlackGateway implements Gateway {
 
     return {
       source: this.name,
-      eventKey: eventId,
+      // The message's own id, so a webhook and catch-up recognise the same message.
+      eventKey: `${event.channel}:${event.ts}`,
       conversationId,
       user: `<@${event.user}>`,
       text,
