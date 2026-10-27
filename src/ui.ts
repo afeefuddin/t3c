@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { color } from "./log.ts";
@@ -42,12 +43,27 @@ export async function ask(
   label: string,
   options: { default?: string; hidden?: boolean; validate?: (value: string) => string | undefined | Promise<string | undefined> } = {},
 ): Promise<string> {
-  const suffix = options.default ? color("dim", ` (${options.hidden ? "keep current" : options.default})`) : "";
+  // Pasting into a hidden prompt doesn't work in every terminal, so an empty answer there reads the clipboard.
+  const fromClipboard = options.hidden && !options.default && process.platform === "darwin";
+  const hint = options.default ? (options.hidden ? "keep current" : options.default) : fromClipboard ? "paste, or copy it and press Enter" : "";
+  const suffix = hint ? color("dim", ` (${hint})`) : "";
   for (;;) {
-    const answer = (await question(`  ${label}${suffix}: `, options.hidden)) || options.default || "";
+    let answer = (await question(`  ${label}${suffix}: `, options.hidden)) || options.default || "";
+    if (!answer && fromClipboard) {
+      answer = clipboard();
+      if (answer) say.hint("Using what's on your clipboard.");
+    }
     const problem = answer ? await options.validate?.(answer) : "Required.";
     if (!problem) return answer;
     say.warn(problem);
+  }
+}
+
+function clipboard() {
+  try {
+    return execFileSync("pbpaste", { encoding: "utf8" }).trim();
+  } catch {
+    return "";
   }
 }
 
