@@ -120,8 +120,8 @@ test("replies go into the Slack thread as mrkdwn", async () => {
 });
 
 test("the manifest points Slack at this machine's hook", () => {
-  const manifest = slackManifest("https://laptop.tail1.ts.net:8443", "mybot");
-  assert.equal(manifest.settings.event_subscriptions.request_url, "https://laptop.tail1.ts.net:8443/hooks/slack");
+  const manifest = slackManifest("https://laptop.tail1.ts.net:10000", "mybot");
+  assert.equal(manifest.settings.event_subscriptions.request_url, "https://laptop.tail1.ts.net:10000/hooks/slack");
   assert.equal(manifest.features.bot_user.display_name, "mybot");
   assert.equal(manifest.settings.socket_mode_enabled, false);
 });

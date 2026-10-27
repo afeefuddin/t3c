@@ -6,8 +6,9 @@ const run = promisify(execFile);
 /**
  * Funnel runs on its own HTTPS port (443, 8443 and 10000 are allowed). Funnel is switched on per
  * port, so a dedicated port keeps whatever else this machine serves on 443 off the internet.
+ * Not 8443: Slack's servers can't reach it (its URL check times out), while 10000 works.
  */
-export const FUNNEL_PORT = 8443;
+export const FUNNEL_PORT = 10000;
 
 async function tailscale(...args: string[]) {
   const { stdout } = await run(process.env.TAILSCALE_BIN ?? "tailscale", args);

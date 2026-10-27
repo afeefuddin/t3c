@@ -97,7 +97,8 @@ Everything is stored in `~/.t3c/state.sqlite`:
 
 t3c receives messages from the internet and turns them into agent work on your machine, so:
 
-- **Only `/hooks` is public.** It goes through Tailscale Funnel on port 8443. t3c itself listens
+- **Only `/hooks` is public.** It goes through Tailscale Funnel on port 10000
+  (Slack can't reach Funnel's other spare port, 8443). t3c itself listens
   only on 127.0.0.1.
 - **Every request is verified.** Slack and GitHub requests must carry a valid signature (Slack's
   must also be under 5 minutes old). HTTP requests need a 32+ character bearer secret.
