@@ -32,3 +32,8 @@ export const message = (overrides: Partial<InboundMessage> = {}): InboundMessage
   projects: ["demo"],
   ...overrides,
 });
+
+/** Replies other than the fixed rules' acknowledgements ("On it!", "Got it…"). */
+export function answers(gateway: FakeGateway) {
+  return gateway.replies.filter((r) => !/^(On it!|Got it, passing)/.test(r.text));
+}

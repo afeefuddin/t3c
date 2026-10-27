@@ -76,7 +76,7 @@ test("if codex fails before acting, the simple rules handle the message", async 
   worker.enqueue(message());
   await worker.idle();
   assert.equal(t3.launches.length, 1);
-  assert.deepEqual(gateway.replies.map((r) => r.text), ["**Done** in t1"]);
+  assert.deepEqual(gateway.replies.map((r) => r.text), ["On it! I'll post here when it's done 👀", "**Done** in t1"]);
 });
 
 test("if codex fails after acting, nothing is redone and the failure is recorded", async () => {

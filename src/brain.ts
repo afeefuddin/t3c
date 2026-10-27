@@ -58,6 +58,7 @@ export class SimpleBrain implements Brain {
     if (threads.length > 0) {
       const latest = threads.at(-1)!;
       await tools.sendToThread({ label: latest.label, text: event.message.text });
+      if (tools.canReply) await tools.reply({ text: "Got it, passing that along 👍" });
       return `sent the follow-up to "${latest.label}"`;
     }
 
@@ -70,6 +71,7 @@ export class SimpleBrain implements Brain {
       projects.find((p) => p.name.toLowerCase() === named) ?? projects.find((p) => text.includes(p.name.toLowerCase())) ?? projects[0];
     const inbound = event.message.inbound!;
     await tools.startThread({ project: project.name, title: inbound.title });
+    if (tools.canReply) await tools.reply({ text: "On it! I'll post here when it's done 👀" });
     return `started a thread in ${project.name}`;
   }
 }

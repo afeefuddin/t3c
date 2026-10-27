@@ -6,7 +6,7 @@ import { Store } from "../src/store.ts";
 import type { ConversationTools } from "../src/agent/tools.ts";
 import { Worker } from "../src/worker.ts";
 import { FakeT3 } from "./fake-t3.ts";
-import { FakeGateway, message } from "./helpers.ts";
+import { answers, FakeGateway, message } from "./helpers.ts";
 
 function setup({ store = new Store(":memory:"), brain = new SimpleBrain() as Brain, stallMs = 15 * 60_000 } = {}) {
   const t3 = new FakeT3();
@@ -25,7 +25,11 @@ test("a message launches a thread with its context, acknowledges, and relays the
   assert.match(t3.launches[0].message, /<conversation>\nbob: it 404s\n<\/conversation>$/);
   assert.deepEqual(t3.launches[0].workspaceStrategy, { type: "worktree", baseRef: "main", branch: "b" });
   assert.deepEqual(gateway.acks, ["e1"]);
-  assert.deepEqual(gateway.replies, [{ conversationId: "conv-1", text: "**Done** in t1" }]);
+  // A friendly acknowledgement straight away, then the answer.
+  assert.deepEqual(gateway.replies, [
+    { conversationId: "conv-1", text: "On it! I'll post here when it's done 👀" },
+    { conversationId: "conv-1", text: "**Done** in t1" },
+  ]);
 
   // Everything is on record: both directions of the conversation and each run.
   const conversation = store.getConversation(stored.conversationId)!;
@@ -33,6 +37,7 @@ test("a message launches a thread with its context, acknowledges, and relays the
     store.messages(conversation.id).map((m) => [m.direction, m.text]),
     [
       ["in", "fix the login bug"],
+      ["out", "On it! I'll post here when it's done 👀"],
       ["out", "**Done** in t1"],
     ],
   );
@@ -60,7 +65,7 @@ test("follow-ups go to the latest thread without re-sending context", async () =
   worker.enqueue(message({ eventKey: "e2", text: "also add a test" }));
   await worker.idle();
   assert.deepEqual(t3.sends, [{ threadId: "t1", message: "also add a test" }]);
-  assert.equal(gateway.replies.length, 2);
+  assert.deepEqual(gateway.replies.map((r) => r.text), ["On it! I'll post here when it's done 👀", "**Done** in t1", "Got it, passing that along 👍", "**Done** in t1"]);
 });
 
 test("a follow-up during a pending answer is answered once, after the newer message", async () => {
@@ -73,7 +78,7 @@ test("a follow-up during a pending answer is answered once, after the newer mess
   await new Promise((r) => setTimeout(r, 20));
   release();
   await worker.idle();
-  assert.equal(gateway.replies.length, 1);
+  assert.equal(answers(gateway).length, 1);
   assert.equal(t3.waits.length, 2);
   assert.ok(t3.waits[1].since > t3.waits[0].since);
 });
@@ -115,7 +120,7 @@ test("after a restart, interrupted messages and owed answers resume", async () =
   worker.start();
   await worker.idle();
   assert.equal(t3.launches.length, 1);
-  assert.deepEqual(gateway.replies.map((r) => r.conversationId).sort(), ["conv-1", "conv-9"]);
+  assert.deepEqual(answers(gateway).map((r) => r.conversationId).sort(), ["conv-1", "conv-9"]);
   assert.deepEqual(store.awaitingThreads(), []);
 });
 
@@ -174,7 +179,7 @@ test("a waiting or failed thread is told to carry on, not reported to the person
   assert.match(t3.sends[0].message, /Nobody is available to answer\. Choose the most reasonable option/);
   assert.match(t3.sends[1].message, /ended with status "failed"\. Find out what went wrong/);
   // Then it completed: one reply with the answer, no questions passed on, and it's settled.
-  assert.deepEqual(gateway.replies.map((r) => r.text), ["**Done** in t1"]);
+  assert.deepEqual(answers(gateway).map((r) => r.text), ["**Done** in t1"]);
   assert.deepEqual(t3.settled, ["t1"]);
 });
 
@@ -184,8 +189,8 @@ test("a thread that keeps waiting is given up on after 3 attempts, with one mess
   worker.enqueue(message());
   await worker.idle();
   assert.equal(t3.sends.length, 3);
-  assert.equal(gateway.replies.length, 1);
-  assert.match(gateway.replies[0].text, /still isn't moving after 3 attempts/);
+  assert.equal(answers(gateway).length, 1);
+  assert.match(answers(gateway)[0].text, /still isn't moving after 3 attempts/);
   assert.deepEqual(store.awaitingThreads(), []);
   assert.deepEqual(t3.settled, []);
 });
@@ -216,15 +221,15 @@ test("the supervisor nudges a stuck thread, then restarts it, then gives up", as
 
   await worker.supervise(); // attempt 2
   await worker.supervise(); // attempt 3
-  assert.equal(gateway.replies.length, 0);
+  assert.equal(answers(gateway).length, 0);
   await worker.supervise(); // attempt 4: give up, stop it, tell the person once
   assert.equal(t3.interrupts.length, 4);
-  assert.match(gateway.replies[0].text, /still isn't moving after 3 attempts/);
+  assert.match(answers(gateway)[0].text, /still isn't moving after 3 attempts/);
   assert.deepEqual(store.awaitingThreads(), []);
   await worker.supervise();
-  assert.equal(gateway.replies.length, 1);
+  assert.equal(answers(gateway).length, 1);
 
   release();
   await worker.idle();
-  assert.equal(gateway.replies.length, 1); // the late answer isn't posted over the give-up
+  assert.equal(answers(gateway).length, 1); // the late answer isn't posted over the give-up
 });

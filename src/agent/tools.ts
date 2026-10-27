@@ -38,6 +38,11 @@ export class ConversationTools {
     return this.ctx.conversation;
   }
 
+  /** Whether this conversation can be replied to (an http caller reads results instead). */
+  get canReply() {
+    return Boolean(this.ctx.gateway.reply);
+  }
+
   get repliesSent() {
     return this.replies;
   }
