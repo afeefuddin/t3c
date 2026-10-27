@@ -1,8 +1,13 @@
 import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { isLoggedIn } from "./auth.ts";
+import { isLoggedIn, t3Auth } from "./auth.ts";
 import { type Config, home, loadConfig, needsFunnel, paths, t3McpUrl } from "./config.ts";
+import { githubApi } from "./gateways/github.ts";
+import { slackApi } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
+import { githubToken } from "./setup.ts";
+import { Store } from "./store.ts";
+import { T3Client } from "./t3.ts";
 import { disableFunnel, enableFunnel, funnelBaseUrl } from "./tailscale.ts";
 import { say } from "./ui.ts";
 
@@ -81,18 +86,59 @@ export async function status() {
   say.step("t3c");
   if (pid) say.ok(`running (pid ${pid}) on 127.0.0.1:${config.port}`);
   else say.warn("not running — `t3c start`");
-  if (isLoggedIn(paths.auth)) say.ok(`connected to T3 Code at ${t3McpUrl()}`);
-  else say.warn("not connected to T3 Code — `t3c login`");
   say.info(`threads run as ${config.runtimeMode} on ${config.model?.model ?? "each project's default model"}; brain: ${config.agent ? `${config.agent.provider} (skills in ${paths.skills})` : "fixed rules"}`);
+
+  say.step("Connections");
+  if (!isLoggedIn(paths.auth)) say.warn("T3 Code: not logged in — `t3c login`");
+  else {
+    await check(`T3 Code at ${t3McpUrl()}`, async () => {
+      const t3 = await T3Client.connect(t3Auth());
+      try {
+        return `${(await t3.listProjects()).length} projects`;
+      } finally {
+        await t3.close();
+      }
+    });
+  }
+  if (config.slack) {
+    const slack = config.slack;
+    await check("Slack", async () => {
+      const auth = await slackApi(slack.botToken)("auth.test");
+      return `${auth.team} as @${auth.user}`;
+    });
+  }
+  if (config.github) await check("GitHub", async () => `@${(await githubApi(githubToken())("GET", "/user")).login}`);
+  if (needsFunnel(config)) {
+    const base = await funnelBaseUrl().catch((e) => {
+      say.warn(`Public URL: unavailable (${errorMessage(e)})`);
+    });
+    if (base && !pid) say.info(`Public URL: ${base}/hooks (published while t3c runs)`);
+    if (base && pid) {
+      // An unsigned request must reach t3c through Funnel and be refused by it.
+      const hook = `${base}/hooks/${config.slack ? "slack" : "github"}`;
+      await check(`Public URL ${base}/hooks`, async () => {
+        const response = await fetch(hook, { method: "POST", signal: AbortSignal.timeout(10_000) });
+        if (response.status !== 401) throw new Error(`expected t3c to refuse an unsigned request, got ${response.status}`);
+        return "reachable from the internet";
+      });
+    }
+  }
 
   say.step("Gateways");
   for (const line of describeGateways(config)) say.info(line);
-  if (needsFunnel(config)) {
-    const url = await funnelBaseUrl().catch((e) => `unavailable (${errorMessage(e)})`);
-    say.step("Public URL");
-    say.info(`${url}/hooks${pid ? "" : " (published while t3c runs)"}`);
-  }
+  const store = new Store(paths.state);
+  const last = store.recentMessages(50).findLast((m) => m.direction === "in");
+  if (last) say.info(`last message received ${new Date(last.createdAt).toLocaleString()} — \`t3c messages\` for more`);
   say.hint(`config: ${paths.config}   logs: ${paths.log}`);
+}
+
+/** Runs one live check and prints ✓ with its detail, or ! with what went wrong. */
+async function check(label: string, probe: () => Promise<string>) {
+  try {
+    say.ok(`${label}: ${await probe()}`);
+  } catch (error) {
+    say.warn(`${label}: ${errorMessage(error)}`);
+  }
 }
 
 export function logs(follow: boolean) {
