@@ -47,7 +47,10 @@ export function createApp({ gateways, worker, store, secret, agentTools }: Serve
       if (req.method === "POST" && root === "hooks" && name && extra === undefined) {
         const body = await readBody(req);
         const challenge = name === "slack" ? slackChallenge(body) : undefined;
-        if (challenge) return send(res, 200, { challenge });
+        if (challenge) {
+          log("slack", "✓ answered Slack's URL check");
+          return send(res, 200, { challenge });
+        }
         const gateway = byName.get(name);
         if (!gateway) return send(res, 404, { error: "Not found." });
         const { response, message } = await gateway.receive({ headers: req.headers, body });
