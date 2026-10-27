@@ -1,6 +1,7 @@
 import type { StoredMessage, ThreadRecord } from "./store.ts";
 import type { ThreadReply } from "./t3.ts";
-import { type ConversationTools, describeReply } from "./tools.ts";
+import { describeReply } from "./agent/prompts.ts";
+import type { ConversationTools } from "./agent/tools.ts";
 
 /** Why the agent woke up. */
 export type AgentEvent =
