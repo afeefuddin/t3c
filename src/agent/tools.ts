@@ -81,6 +81,11 @@ export class ConversationTools {
     });
   }
 
+  /** The earlier platform conversation, if any, without recording a tool call: for the agent's prompt. */
+  async source(): Promise<string | undefined> {
+    return (await this.prepare()).context;
+  }
+
   /** The source conversation as the platform has it now (Slack thread, GitHub issue and comments). */
   fetchSource() {
     return this.record("fetch_source", {}, async () => (await this.prepare()).context ?? "(no earlier messages)");

@@ -64,7 +64,9 @@ export class CodexBrain implements Brain {
     const skills = loadSkills(this.options.skillsDir);
     const token = this.options.toolServer.open(tools, skills);
     try {
-      const prompt = agentPrompt(event, await tools.getConversation(), skills);
+      // Without the source the run still works; start_thread reports the same error if it matters.
+      const source = event.type === "message" ? await tools.source().catch((error) => void log("agent", `couldn't fetch the source: ${errorMessage(error)}`, "warn")) : undefined;
+      const prompt = agentPrompt(event, await tools.getConversation(), skills, source);
       this.lockdown ??= lockdownArgs(this.options.codexBin ?? "codex");
       return await this.exec(prompt, token, await this.lockdown);
     } catch (error) {
