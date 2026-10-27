@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { header, safeEqual } from "../gateway.ts";
+import type { Skill } from "./skills.ts";
 import type { ConversationTools } from "./tools.ts";
 
 /**
@@ -12,12 +13,12 @@ import type { ConversationTools } from "./tools.ts";
  * can never act on another conversation, and nothing works once the run ends.
  */
 export class AgentToolServer {
-  private readonly runs = new Map<string, ConversationTools>();
+  private readonly runs = new Map<string, { tools: ConversationTools; skills: Skill[] }>();
 
-  /** Registers a run's tools; returns its token. */
-  open(tools: ConversationTools): string {
+  /** Registers a run's tools and the skills its prompt lists; returns its token. */
+  open(tools: ConversationTools, skills: Skill[] = []): string {
     const token = randomBytes(32).toString("base64url");
-    this.runs.set(token, tools);
+    this.runs.set(token, { tools, skills });
     return token;
   }
 
@@ -27,12 +28,12 @@ export class AgentToolServer {
 
   async handle(req: IncomingMessage, res: ServerResponse) {
     const presented = header(req.headers, "authorization").replace(/^Bearer /, "");
-    const tools = [...this.runs].find(([token]) => safeEqual(token, presented))?.[1];
-    if (!tools) {
+    const run = [...this.runs].find(([token]) => safeEqual(token, presented))?.[1];
+    if (!run) {
       res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: "Unknown or finished run." }));
       return;
     }
-    const server = buildServer(tools);
+    const server = buildServer(run.tools, run.skills);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on("close", () => void server.close());
     await server.connect(transport);
@@ -40,7 +41,7 @@ export class AgentToolServer {
   }
 }
 
-function buildServer(tools: ConversationTools) {
+function buildServer(tools: ConversationTools, skills: Skill[]) {
   const server = new McpServer({ name: "t3c", version: "0.1.0" });
   // Tool errors go back to the agent as isError results, so it can correct itself.
   const add = (name: string, description: string, shape: z.ZodRawShape, run: (input: any) => Promise<unknown>) =>
@@ -52,6 +53,12 @@ function buildServer(tools: ConversationTools) {
       }
     });
 
+  add(
+    "load_skill",
+    "The instructions of a skill listed in your prompt. Load each one whose description fits the event before you act.",
+    { name: z.string().describe("The skill's name, as listed") },
+    async (i) => tools.loadSkill(i, skills),
+  );
   add(
     "get_conversation",
     "This conversation as t3c has it: state, your notes, attached T3 threads and recent messages. Your prompt already has it as of the run's start.",
@@ -73,9 +80,9 @@ function buildServer(tools: ConversationTools) {
   );
   add(
     "list_threads",
-    "Active T3 threads in the projects this conversation may use, including ones started in T3 Code or from other conversations: title, project, status, start time, and label if it's this conversation's. For questions about what's being worked on.",
-    {},
-    () => tools.listThreads(),
+    "T3 threads in the projects this conversation may use, including ones started in T3 Code or from other conversations: title, project, status, last activity, and label if it's this conversation's. Without search: the active ones. With search: every thread whose title contains it, finished ones included. For questions about work that's running or was done.",
+    { search: z.string().max(100).optional().describe('A word from the title to look for, e.g. "fold" or "login"') },
+    (i) => tools.listThreads(i),
   );
   add(
     "inspect_thread",
@@ -96,9 +103,10 @@ function buildServer(tools: ConversationTools) {
   );
   add(
     "send_to_thread",
-    "Send a follow-up to a thread in this conversation; a busy thread picks it up too. Its answer comes back to you as a new event.",
+    "Send a message straight to a thread: one of this conversation's (by label), or any thread from list_threads (by threadId), which then joins this conversation under a label. A busy thread picks it up too. Its answer comes back to you as a new event. Never start a new thread to pass a message on.",
     {
-      label: z.string().describe("The thread's label"),
+      label: z.string().optional().describe("The label of one of this conversation's threads"),
+      threadId: z.string().optional().describe("A threadId from list_threads, to message a thread started elsewhere"),
       text: z.string().max(20_000).describe("Your message to the coding agent, written for it: what changes and why, not the chat verbatim"),
     },
     (i) => tools.sendToThread(i),

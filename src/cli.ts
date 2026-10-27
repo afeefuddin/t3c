@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { CodexBrain } from "./agent/codex.ts";
 import { AgentToolServer } from "./agent/mcp.ts";
-import { ensureSkills } from "./agent/skills.ts";
+import { overriddenSkills } from "./agent/skills.ts";
 import { isLoggedIn, t3Auth } from "./auth.ts";
 import { loadConfig, paths, saveConfig } from "./config.ts";
 import { type Brain, SimpleBrain } from "./brain.ts";
@@ -253,6 +253,10 @@ async function serve() {
         fallback: simple,
       })
     : simple;
+  if (config.agent) {
+    const replaced = overriddenSkills(paths.skills);
+    if (replaced.length > 0) log("agent", `your ${replaced.join(", ")} in ${paths.skills} replace the built-in skills of that name`, "warn");
+  }
   const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store, config), store, t3, brain });
   worker.start();
   // Webhooks get lost sometimes, and none arrive while this machine sleeps.
@@ -298,9 +302,8 @@ async function agent(provider: string | undefined) {
     }
     config.agent = { provider: "codex", ...(values.model ? { model: values.model } : {}) };
     saveConfig(config);
-    ensureSkills(paths.skills);
     say.ok(`Codex now decides what to do with messages${values.model ? ` (model ${values.model})` : ""}.`);
-    say.info(`Skills: ${paths.skills} — edit them or add your own .md files.`);
+    say.info(`Skills: add <name>/SKILL.md folders to ${paths.skills}; one named like a built-in skill replaces it.`);
     say.hint("If Codex fails, t3c falls back to the fixed rules. Apply with `t3c restart`.");
   } else {
     say.info(config.agent ? `Agent: ${config.agent.provider}${config.agent.model ? ` (${config.agent.model})` : ""}` : "Agent: off (fixed rules)");

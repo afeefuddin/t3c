@@ -13,6 +13,8 @@ export interface ThreadSummary {
   title: string;
   status: string;
   createdAt: string;
+  updatedAt?: string;
+  settled?: boolean;
 }
 
 export type WorkspaceStrategy =

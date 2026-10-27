@@ -1,3 +1,8 @@
+---
+name: write-thread-prompt
+description: How to write the prompt that starts a T3 thread, or a follow-up message to one: a self-contained task with no chat noise. Use whenever you call start_thread or send_to_thread.
+---
+
 # Write the thread prompt
 
 The coding agent in a T3 thread sees only the prompt you write. It doesn't see the chat or issue

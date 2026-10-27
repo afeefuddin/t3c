@@ -41,6 +41,8 @@ export interface ThreadRecord {
   title: string;
   t3ThreadId: string | null;
   status: "launching" | "launched" | "failed";
+  /** "started" by t3c for this conversation, or an existing T3 thread "attached" to it to message it. */
+  origin: "started" | "attached";
   error: string | null;
   /** Send time of the newest message to this thread still owed an answer; null when nothing is owed. */
   awaitingSince: string | null;
@@ -108,6 +110,7 @@ export class Store {
         status TEXT NOT NULL,
         error TEXT,
         awaiting_since TEXT,
+        origin TEXT NOT NULL DEFAULT 'started',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (conversation_id, label)
@@ -124,6 +127,9 @@ export class Store {
         finished_at TEXT
       );
     `);
+    // Databases from before threads had an origin.
+    const threadColumns = this.db.prepare("PRAGMA table_info(threads)").all() as { name: string }[];
+    if (!threadColumns.some((c) => c.name === "origin")) this.db.exec("ALTER TABLE threads ADD COLUMN origin TEXT NOT NULL DEFAULT 'started'");
   }
 
   // ── conversations ──────────────────────────────────────────────────────────
@@ -138,6 +144,16 @@ export class Store {
       .prepare("SELECT * FROM conversations WHERE source = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?")
       .all(source, since, limit);
     return (rows as Row[]).map((r) => toConversation(r)!);
+  }
+
+  /** When the first incoming message arrived in conversations whose external id starts with `prefix`. */
+  firstInboundAt(source: string, prefix: string): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT MIN(m.created_at) AS at FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.source = ? AND m.direction = 'in' AND substr(c.external_id, 1, ?) = ?",
+      )
+      .get(source, prefix.length, prefix) as { at: string | null } | undefined;
+    return row?.at ?? undefined;
   }
 
   /** The first incoming message of a conversation. */
@@ -268,6 +284,32 @@ export class Store {
     return toThread(row as Row);
   }
 
+  /** The record of a T3 thread within a conversation, if it's started or attached there. */
+  findThreadByT3Id(conversationId: string, t3ThreadId: string): ThreadRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM threads WHERE conversation_id = ? AND t3_thread_id = ?").get(conversationId, t3ThreadId);
+    return toThread(row as Row);
+  }
+
+  /**
+   * Attaches an existing T3 thread (started in T3 Code or elsewhere) to a conversation, so it can
+   * be messaged and its answers come back there. The label is `label`, or `label-2`… if taken.
+   */
+  attachThread(input: { conversationId: string; label: string; projectId: string; title: string; t3ThreadId: string }): ThreadRecord {
+    const existing = this.findThreadByT3Id(input.conversationId, input.t3ThreadId);
+    if (existing) return existing;
+    const taken = new Set(this.threads(input.conversationId).map((t) => t.label));
+    let label = input.label;
+    for (let n = 2; taken.has(label); n++) label = `${input.label}-${n}`;
+    const time = now();
+    const row = this.db
+      .prepare(
+        `INSERT INTO threads (id, conversation_id, label, project_id, title, t3_thread_id, status, origin, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'launched', 'attached', ?, ?) RETURNING *`,
+      )
+      .get(randomUUID(), input.conversationId, label, input.projectId, input.title, input.t3ThreadId, time, time);
+    return toThread(row as Row)!;
+  }
+
   /**
    * Claims (conversation, label) for a launch. Returns undefined when another launch holds it,
    * so two concurrent deliveries can't spawn two threads. A failed thread may be claimed again.
@@ -375,6 +417,7 @@ function toThread(row: Row): ThreadRecord | undefined {
     title: row.title,
     t3ThreadId: row.t3_thread_id,
     status: row.status,
+    origin: row.origin ?? "started",
     error: row.error,
     awaitingSince: row.awaiting_since,
     createdAt: row.created_at,

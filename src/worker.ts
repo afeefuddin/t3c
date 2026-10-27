@@ -171,7 +171,8 @@ export class Worker {
             }
             await this.locked(conversation.id, () => this.run(conversation, { type: "thread_finished", thread: current, reply, attempt }));
             // Done unless the brain sent it more work: settle it, so T3's active list holds what's live.
-            if (finished && !this.store.getThread(thread.id)?.awaitingSince) await this.settle(current);
+            // Threads t3c only attached to belong to whoever started them; they stay as they are.
+            if (finished && current.origin === "started" && !this.store.getThread(thread.id)?.awaitingSince) await this.settle(current);
             // The brain may have sent it more work (a follow-up or a nudge): keep watching.
             continue;
           }

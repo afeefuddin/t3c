@@ -65,7 +65,7 @@ test("follow-ups go to the latest thread without re-sending context", async () =
   worker.enqueue(message({ eventKey: "e2", text: "also add a test" }));
   await worker.idle();
   assert.deepEqual(t3.sends, [{ threadId: "t1", message: "also add a test" }]);
-  assert.deepEqual(gateway.replies.map((r) => r.text), ["On it! I'll post here when it's done 👀", "**Done** in t1", "Got it, passing that along 👍", "**Done** in t1"]);
+  assert.deepEqual(gateway.replies.map((r) => r.text), ["On it! I'll post here when it's done 👀", "**Done** in t1", "Got it, on it 👍", "**Done** in t1"]);
 });
 
 test("a follow-up during a pending answer is answered once, after the newer message", async () => {
@@ -232,4 +232,18 @@ test("the supervisor nudges a stuck thread, then restarts it, then gives up", as
   release();
   await worker.idle();
   assert.equal(answers(gateway).length, 1); // the late answer isn't posted over the give-up
+});
+
+test("an attached thread's answer comes back, and t3c leaves the thread unsettled", async () => {
+  const { t3, store, gateway, worker } = setup();
+  const stored = worker.enqueue(message())!;
+  await worker.idle();
+  t3.settled.length = 0;
+  const conversation = store.getConversation(stored.conversationId)!;
+  const attached = store.attachThread({ conversationId: conversation.id, label: "chat-ui", projectId: "p1", title: "Chat UI", t3ThreadId: "ext1" });
+  store.setAwaiting(attached.id, new Date().toISOString());
+  worker.start();
+  await worker.idle();
+  assert.ok(gateway.replies.some((r) => r.text === "**Done** in ext1"));
+  assert.deepEqual(t3.settled, []);
 });

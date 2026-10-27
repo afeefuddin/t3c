@@ -61,9 +61,10 @@ export class CodexBrain implements Brain {
   }
 
   async handle(event: AgentEvent, tools: ConversationTools): Promise<string> {
-    const token = this.options.toolServer.open(tools);
+    const skills = loadSkills(this.options.skillsDir);
+    const token = this.options.toolServer.open(tools, skills);
     try {
-      const prompt = agentPrompt(event, await tools.getConversation(), loadSkills(this.options.skillsDir));
+      const prompt = agentPrompt(event, await tools.getConversation(), skills);
       this.lockdown ??= lockdownArgs(this.options.codexBin ?? "codex");
       return await this.exec(prompt, token, await this.lockdown);
     } catch (error) {

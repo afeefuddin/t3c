@@ -32,6 +32,10 @@ if (prompt.includes("<thread-answer>")) {
   await call("reply", { text: "Fixed: the header no longer overlaps. PR is up." });
   summary = "summarized the answer";
 } else {
+  // Loads the skill the prompt lists for new requests, the way a model would.
+  if (!prompt.includes("- new-requests: ")) throw new Error("new-requests skill not listed");
+  const skill = await call("load_skill", { name: "new-requests" });
+  if (!skill.value?.includes("start_thread")) throw new Error(`load_skill failed: ${skill.error}`);
   const projects = (await call("list_projects")).value.map((p) => p.name);
   // Routes to the project the request mentions, the way a model would.
   const project = projects.find((p) => prompt.toLowerCase().includes(p.toLowerCase())) ?? projects[0];

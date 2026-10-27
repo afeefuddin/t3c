@@ -4,6 +4,7 @@ import { log } from "../log.ts";
 import type { AgentRun, Conversation, Store, ThreadRecord } from "../store.ts";
 import type { T3 } from "../t3.ts";
 import { threadPrompt } from "./prompts.ts";
+import type { Skill } from "./skills.ts";
 
 /** Per-run caps, so a confused or manipulated run can't spam or fan out. */
 export const LIMITS = { replies: 3, launches: 3, replyChars: 400 };
@@ -29,8 +30,8 @@ export class ConversationTools {
   private replies = 0;
   private launches = 0;
   private preparation: Promise<Preparation> | undefined;
-  /** Threads list_threads showed this run, by T3 id: the only ones inspect_thread may read. */
-  private readonly listed = new Set<string>();
+  /** Threads list_threads showed this run, by T3 id: the only others the run may read or message. */
+  private readonly listed = new Map<string, { projectId: string; title: string }>();
 
   constructor(ctx: ToolContext) {
     this.ctx = ctx;
@@ -52,6 +53,15 @@ export class ConversationTools {
   /** Whether the run changed anything (started/messaged a thread, posted, asked). */
   get acted() {
     return this.actions.some((a) => ACTING_TOOLS.has(a.tool) && !a.error);
+  }
+
+  /** A skill's instructions, from the skills listed in this run's prompt. */
+  loadSkill(input: { name: string }, skills: Skill[]) {
+    return this.record("load_skill", input, () => {
+      const skill = skills.find((s) => s.name === input.name);
+      if (!skill) throw new Error(`No skill "${input.name}". Skills: ${skills.map((s) => s.name).join(", ") || "none"}.`);
+      return skill.body;
+    });
   }
 
   /** Summary, state, attached threads and recent messages. */
@@ -88,20 +98,30 @@ export class ConversationTools {
   }
 
   /**
-   * Active T3 threads in the projects this conversation may work in, started anywhere (by people
-   * in T3 Code, or from other conversations), newest first. Read-only.
+   * T3 threads in the projects this conversation may work in, started anywhere (by people in T3
+   * Code, or from other conversations), newest first. Read-only. Without `search`, the active ones;
+   * with it, every thread whose title contains it, finished ones included.
    */
-  listThreads() {
-    return this.record("list_threads", {}, async () => {
+  listThreads(input: { search?: string } = {}) {
+    return this.record("list_threads", input, async () => {
       const own = new Map(this.ctx.store.threads(this.ctx.conversation.id).map((t) => [t.t3ThreadId, t.label]));
+      const filter = input.search?.trim() ? { titleContains: input.search.trim() } : { settled: false };
       const lists = await Promise.all(
         (await this.allowedProjects()).map(async (p) =>
-          (await this.ctx.t3.listThreads(p.id, { settled: false })).map((t) => ({ ...t, project: p.title })),
+          (await this.ctx.t3.listThreads(p.id, filter)).map((t) => ({ ...t, project: p.title, projectId: p.id })),
         ),
       );
-      return lists.flat().map(({ threadId, title, status, createdAt, project }) => {
-        this.listed.add(threadId);
-        return { threadId, title, project, status, startedAt: createdAt, ...(own.has(threadId) ? { label: own.get(threadId) } : {}) };
+      return lists.flat().map(({ threadId, title, status, settled, createdAt, updatedAt, project, projectId }) => {
+        this.listed.set(threadId, { projectId, title });
+        return {
+          threadId,
+          title,
+          project,
+          status,
+          ...(settled ? { finished: true } : {}),
+          lastActive: updatedAt ?? createdAt,
+          ...(own.has(threadId) ? { label: own.get(threadId) } : {}),
+        };
       });
     });
   }
@@ -109,7 +129,8 @@ export class ConversationTools {
   /** Status and latest messages of a thread from list_threads, without disturbing it. */
   inspectThread(input: { threadId: string }) {
     return this.record("inspect_thread", input, async () => {
-      if (!this.listed.has(input.threadId)) throw new Error("Unknown thread. Use a threadId from list_threads.");
+      const own = this.ctx.store.findThreadByT3Id(this.ctx.conversation.id, input.threadId);
+      if (!own && !this.listed.has(input.threadId)) throw new Error("Unknown thread. Use a threadId from list_threads.");
       return this.ctx.t3.recentMessages(input.threadId);
     });
   }
@@ -154,10 +175,15 @@ export class ConversationTools {
     });
   }
 
-  /** Sends a message to an attached thread; its answer will come back as an event. */
-  sendToThread(input: { label: string; text: string }) {
+  /**
+   * Sends a message to a thread of this conversation (by label), or to any thread list_threads
+   * showed this run (by threadId), which is then attached to this conversation under a label.
+   * Either way its answer will come back as an event.
+   */
+  sendToThread(input: { label?: string; threadId?: string; text: string }) {
     return this.record("send_to_thread", input, async () => {
-      const thread = this.thread(input.label);
+      if (!input.threadId && !input.label) throw new Error("Give the thread's label, or a threadId from list_threads.");
+      const thread = input.threadId ? this.attach(input.threadId) : this.thread(input.label!);
       const sentAt = new Date().toISOString();
       await this.ctx.dispatcher.send(thread, input.text);
       this.ctx.store.setAwaiting(thread.id, sentAt);
@@ -219,6 +245,18 @@ export class ConversationTools {
     return { posted: true };
   }
 
+  /** A thread from list_threads as one of this conversation's, attaching it if it isn't yet. */
+  private attach(threadId: string): ThreadRecord {
+    const { store, conversation } = this.ctx;
+    const own = store.findThreadByT3Id(conversation.id, threadId);
+    if (own) return own;
+    const listed = this.listed.get(threadId);
+    if (!listed) throw new Error("Unknown thread. Use a threadId from list_threads.");
+    const thread = store.attachThread({ conversationId: conversation.id, label: slug(listed.title).slice(0, 40), t3ThreadId: threadId, ...listed });
+    log(conversation.source, `↔ attached T3 thread ${threadId} as "${thread.label}" (${conversation.externalId})`);
+    return thread;
+  }
+
   private thread(label: string): ThreadRecord {
     const thread = this.ctx.store.findThread(this.ctx.conversation.id, label);
     if (!thread || thread.status !== "launched") {
@@ -255,7 +293,14 @@ export class ConversationTools {
 }
 
 function describeThread(t: ThreadRecord) {
-  return { label: t.label, title: t.title, status: t.status, waitingForAnswer: t.awaitingSince !== null, error: t.error };
+  return {
+    label: t.label,
+    title: t.title,
+    status: t.status,
+    ...(t.origin === "attached" ? { attached: true } : {}),
+    waitingForAnswer: t.awaitingSince !== null,
+    error: t.error,
+  };
 }
 
 function slug(text: string) {

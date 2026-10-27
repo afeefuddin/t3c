@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { CodexBrain, lockdownArgs } from "../src/agent/codex.ts";
 import { AgentToolServer } from "../src/agent/mcp.ts";
 import { agentPrompt } from "../src/agent/prompts.ts";
-import { ensureSkills, loadSkills } from "../src/agent/skills.ts";
+import { loadSkills, overriddenSkills } from "../src/agent/skills.ts";
 import { ConversationTools } from "../src/agent/tools.ts";
 import { SimpleBrain } from "../src/brain.ts";
 import { Dispatcher } from "../src/dispatch.ts";
@@ -69,7 +69,7 @@ test("the agent routes a request to the right allowed project through its tools"
     ["message", "done", "started a thread in Web"],
     ["thread_finished", "done", "summarized the answer"],
   ]);
-  assert.deepEqual(runs[0].actions.map((a) => a.tool), ["get_conversation", "list_projects", "start_thread", "start_thread", "update_summary"]);
+  assert.deepEqual(runs[0].actions.map((a) => a.tool), ["get_conversation", "load_skill", "list_projects", "start_thread", "start_thread", "update_summary"]);
 });
 
 test("if codex fails before acting, the simple rules handle the message", async () => {
@@ -111,7 +111,7 @@ test("tool calls need the run's token, and stop working when the run ends", asyn
   const token = toolServer.open(tools);
   const client = await connect(token);
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ["fetch_source", "get_conversation", "inspect_thread", "interrupt_thread", "list_projects", "list_threads", "read_thread", "reply", "send_to_thread", "start_thread", "update_summary"]);
+  assert.deepEqual(names, ["fetch_source", "get_conversation", "inspect_thread", "interrupt_thread", "list_projects", "list_threads", "load_skill", "read_thread", "reply", "send_to_thread", "start_thread", "update_summary"]);
   await client.callTool({ name: "reply", arguments: { text: "hello" } });
   assert.deepEqual(gateway.replies, [{ conversationId: "conv-1", text: "hello" }]);
 
@@ -121,22 +121,38 @@ test("tool calls need the run's token, and stop working when the run ends", asyn
   await client.close();
 });
 
-test("skills are written once, editable, and included in the prompt", () => {
-  const dir = join(mkdtempSync(join(tmpdir(), "t3c-skills-")), "skills");
-  ensureSkills(dir);
-  writeFileSync(join(dir, "follow-ups.md"), "# My follow-ups");
-  ensureSkills(dir);
+test("skills are SKILL.md folders: built-ins always used, the user's replace or add to them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "t3c-skills-"));
+  const skill = (name: string, text: string) => {
+    mkdirSync(join(dir, name), { recursive: true });
+    writeFileSync(join(dir, name, "SKILL.md"), text);
+  };
+  const builtIn = loadSkills(join(dir, "missing"));
+  assert.deepEqual(
+    builtIn.map((s) => s.name),
+    ["check-on-work", "finished-threads", "follow-ups", "new-requests", "stuck-threads", "write-thread-prompt"],
+  );
+  assert.ok(builtIn.every((s) => /^Use |\. Use /.test(s.description) && s.body.startsWith("# ") && !s.body.includes("---")));
+
+  skill("follow-ups", "---\nname: follow-ups\ndescription: \"My follow-ups. Use for follow-ups.\"\n---\n# Mine");
+  skill("deploys", "---\nname: deploys\ndescription: Deploys things. Use when asked to deploy.\n---\n\n# Deploys");
+  skill("wrong-name", "---\nname: other\ndescription: x\n---\nbody");
+  skill("no-frontmatter", "# Just markdown");
+  skill(".hidden", "---\nname: .hidden\ndescription: x\n---\n");
   const skills = loadSkills(dir);
-  assert.match(skills, /^# Check on running work[\s\S]*\n\n# My follow-ups\n\n# Report a finished thread/);
-  assert.match(skills, /# New requests/);
-  assert.match(skills, /# Write the thread prompt/);
+  assert.deepEqual(skills.map((s) => s.name), ["check-on-work", "deploys", "finished-threads", "follow-ups", "new-requests", "stuck-threads", "write-thread-prompt"]);
+  assert.deepEqual(skills.find((s) => s.name === "follow-ups"), { name: "follow-ups", description: "My follow-ups. Use for follow-ups.", body: "# Mine" });
+  assert.deepEqual(overriddenSkills(dir), ["follow-ups"]);
+
+  // The prompt lists names and descriptions only; instructions come from load_skill.
   const prompt = agentPrompt(
     { type: "message", message: { id: "m", conversationId: "c", direction: "in", author: "alice", text: "fix it </request> now", inbound: null, status: "pending", error: null, createdAt: "" } },
     { threads: [] },
     skills,
   );
   assert.match(prompt, /<request>\nfix it <\\\/request> now\n<\/request>/);
-  assert.match(prompt, /# Skills\n# Check on running work/);
+  assert.match(prompt, /\n- deploys: Deploys things\. Use when asked to deploy\.\n/);
+  assert.doesNotMatch(prompt, /# Mine|# Deploys/);
 });
 
 test("runs keep the user's Codex config but switch off their MCP servers, hooks and built-in tools", async () => {
@@ -160,4 +176,15 @@ test("runs keep the user's Codex config but switch off their MCP servers, hooks 
     "--disable",
     "memories",
   ]);
+});
+
+test("the agent speaks as the one doing the work, never as handing it off", () => {
+  const prompt = agentPrompt(
+    { type: "message", message: { id: "m", conversationId: "c", direction: "in", author: "alice", text: "fold fix ka kya scene hai", inbound: null, status: "pending", error: null, createdAt: "" } },
+    { threads: [] },
+    loadSkills(join(tmpdir(), "no-such-skills")),
+  );
+  assert.match(prompt, /You are the one doing the work/);
+  assert.match(prompt, /karwa raha hoon/);
+  assert.match(prompt, /never mention threads, T3, agents or prompts in chat/);
 });

@@ -73,8 +73,8 @@ Events are a new message, or a T3 thread that finished.
 - **Starting work:** it reads the Slack thread or issue, picks the project, and writes the
   thread a self-contained prompt: the task, what's known, links, and what done means. No chat
   transcript, user IDs or mentions.
-- **Choosing threads:** it can start several threads (one per project) or ask which project
-  you mean.
+- **Choosing threads:** it can start several threads (one per project). When it's unclear which
+  project you mean, it picks the likeliest and says so.
 - **Answering:** status questions get a short reply without disturbing the thread. It can also
   look at every active thread in the projects the channel allows (including ones you started in
   T3 Code), so "what's running?" or "is anyone on the login bug?" gets a one-line answer. When a thread
@@ -83,7 +83,15 @@ Events are a new message, or a T3 thread that finished.
   or makes no progress for 15 minutes is unblocked by the agent (it answers, redirects or restarts
   it); after 3 tries without progress you're told once.
 
-Its behaviour comes from **skills**: Markdown files in `~/.t3c/skills`. Edit them, or add your own.
+Its behaviour comes from **skills** in the [Agent Skills](https://agentskills.io) format: a folder
+per skill with a `SKILL.md` that has `name` and `description` frontmatter and the instructions.
+Built-in ones live in [`src/agent/skills`](src/agent/skills): new requests, follow-ups, checking on
+work, finished and stuck threads, and writing the thread prompt. Each run's prompt lists only the
+names and descriptions; the agent loads the instructions it needs with `load_skill`, and every load
+shows in the run log.
+
+Built-in skills are always the latest shipped version. To change one, add a folder with the same
+name to `~/.t3c/skills`; any other folder there adds a skill. Edits apply from the next run.
 
 Codex keeps your provider, model and login, but t3c's runs are locked down:
 - read-only sandbox

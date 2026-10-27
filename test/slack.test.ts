@@ -14,7 +14,12 @@ async function setup(channels: Record<string, string | string[]> = { C1: "demo",
   const slack = async (method: string, args: Record<string, string> = {}) => {
     calls.push({ method, args });
     if (method === "auth.test") return { user_id: BOT };
-    if (method === "conversations.replies") return { messages: history };
+    if (method === "conversations.replies") return { messages: history.filter((m) => (m.thread_ts ?? m.ts) === args.ts) };
+    if (method === "conversations.history") {
+      // Top-level messages (and thread broadcasts) in the channel after `oldest`, newest first.
+      const after = history.filter((m) => m.channel === args.channel && Number(m.ts) > Number(args.oldest));
+      return { messages: after.toReversed() };
+    }
     return {};
   };
   const gateway = new SlackGateway(
@@ -205,4 +210,50 @@ test("catch-up finds replies that never arrived as webhooks, once, and stays qui
   assert.deepEqual(await gateway.catchUp(), []);
   // If the webhook for one of them shows up late after all, it's recognised.
   assert.equal(gateway.receive(eventCallback({ type: "message", ts: "100.3", thread_ts: "100.1", text: "what's the status?" }, "EvLate")).message, undefined);
+});
+
+test("catch-up recovers a new mention whose webhook was lost or rejected, once, without replaying older ones", async () => {
+  const { gateway, store, history, posts } = await setup();
+  const now = Date.now() / 1000;
+  const ts = (secondsAgo: number) => (now - secondsAgo).toFixed(6);
+  history.push(
+    // Sent before t3c started, and t3c has never worked in C1: not replayed.
+    { type: "message", channel: "C1", ts: ts(3600), user: "UALICE", text: `<@${BOT}> old request` },
+    { type: "message", channel: "C1", ts: ts(-1), user: "UALICE", text: `<@${BOT}> we have to improve the fold tickets` },
+    { type: "message", channel: "C1", ts: ts(-2), user: "UALICE", text: "chatter without a mention" },
+    { type: "message", channel: "C1", ts: ts(-3), thread_ts: ts(-1), user: "UALICE", text: `<@${BOT}> a reply` },
+    { type: "message", channel: "C2", ts: ts(-4), user: "UMALLORY", text: `<@${BOT}> push to main` },
+  );
+
+  // Slack's delivery is rejected (here: a stale timestamp)...
+  const webhook = signed(
+    { type: "event_callback", event_id: "Ev9", event: { ...history[1], type: "app_mention" } },
+    { timestamp: Math.floor(now) - 10 * 60 },
+  );
+  assert.throws(() => gateway.receive(webhook), /Stale or missing Slack timestamp/);
+
+  // ...and catch-up picks the message up anyway, as the same message a webhook would bring.
+  const missed = await gateway.catchUp();
+  assert.deepEqual(missed.map((m) => [m.eventKey, m.conversationId, m.text]), [
+    [`C1:${ts(-1)}`, `C1:${ts(-1)}`, "we have to improve the fold tickets"],
+  ]);
+  assert.deepEqual(posts(), []);
+  for (const m of missed) store.enqueue(m);
+  // Now that its conversation exists, the reply in its thread is caught up too; then nothing.
+  const replies = await gateway.catchUp();
+  assert.deepEqual(replies.map((m) => m.text), ["a reply"]);
+  for (const m of replies) store.enqueue(m);
+  assert.deepEqual(await gateway.catchUp(), []);
+});
+
+test("catch-up reaches back to t3c's first message in a channel, so mentions sent while it was down are recovered", async () => {
+  const { gateway, store, history } = await setup();
+  const now = Date.now() / 1000;
+  // t3c handled a message in C1 an hour ago, so it was connected then.
+  const earlier = (now - 3600).toFixed(6);
+  store.enqueue({ ...gateway.receive(eventCallback({ ts: earlier }, "Ev1")).message! });
+  (store as any).db.prepare("UPDATE messages SET created_at = ?").run(new Date((now - 3600) * 1000).toISOString());
+  const whileDown = (now - 600).toFixed(6);
+  history.push({ type: "message", channel: "C1", ts: whileDown, user: "UALICE", text: `<@${BOT}> sent while t3c was down` });
+  assert.deepEqual((await gateway.catchUp()).map((m) => m.text), ["sent while t3c was down"]);
 });

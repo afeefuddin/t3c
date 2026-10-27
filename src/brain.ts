@@ -58,7 +58,7 @@ export class SimpleBrain implements Brain {
     if (threads.length > 0) {
       const latest = threads.at(-1)!;
       await tools.sendToThread({ label: latest.label, text: event.message.text });
-      if (tools.canReply) await tools.reply({ text: "Got it, passing that along 👍" });
+      if (tools.canReply) await tools.reply({ text: "Got it, on it 👍" });
       return `sent the follow-up to "${latest.label}"`;
     }
 

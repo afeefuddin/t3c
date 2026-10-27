@@ -55,6 +55,8 @@ export class SlackGateway implements Gateway {
   private readonly store: Store;
   private readonly slack: SlackCall;
   private botUserId = "";
+  /** Messages after this were sent while t3c was running, so any it doesn't have were lost. */
+  private readonly startedAt = Date.now() / 1000;
   private readonly names = new Map<string, Promise<string>>();
 
   constructor(config: SlackConfig, deps: { store: Store; slack?: SlackCall }) {
@@ -70,7 +72,7 @@ export class SlackGateway implements Gateway {
   }
 
   receive({ headers, body }: GatewayRequest): Received {
-    this.verify(header(headers, "x-slack-request-timestamp"), header(headers, "x-slack-signature"), body);
+    this.verify(headers, body);
     const payload = JSON.parse(body.toString("utf8"));
     if (payload.type !== "event_callback") return {};
     if (process.env.T3C_DEBUG) {
@@ -82,10 +84,40 @@ export class SlackGateway implements Gateway {
   }
 
   /**
-   * Replies in followed threads that Slack never delivered: Slack drops a webhook now and then,
-   * and none arrive while this machine is asleep. Reads the threads active in the last day.
+   * Messages Slack never delivered, or delivered in a way t3c had to reject: Slack drops a webhook
+   * now and then, and none arrive while this machine is asleep or t3c is down. Covers new mentions
+   * in the connected channels and replies in followed threads.
    */
   async catchUp(): Promise<InboundMessage[]> {
+    return [...(await this.missedMentions()), ...(await this.missedReplies())];
+  }
+
+  /**
+   * New top-level mentions in each connected channel since t3c was first seen working there (or
+   * started), at most a day back, so mentions from before t3c was connected aren't replayed.
+   * Channels connected through "*" aren't listed in the config, so they aren't covered.
+   */
+  private async missedMentions(): Promise<InboundMessage[]> {
+    const mention = `<@${this.botUserId}>`;
+    const missed: InboundMessage[] = [];
+    for (const channel of Object.keys(this.config.channels)) {
+      if (channel === ANY_CHANNEL) continue;
+      const firstSeen = this.store.firstInboundAt(this.name, `${channel}:`);
+      const live = Math.min(this.startedAt, firstSeen ? Date.parse(firstSeen) / 1000 : Infinity);
+      const oldest = Math.max(live, Date.now() / 1000 - CATCH_UP_WINDOW_MS / 1000);
+      const { messages } = await this.slack("conversations.history", { channel, oldest: oldest.toFixed(6), limit: "100" });
+      // Newest first from Slack; handled oldest first.
+      for (const m of (messages as SlackEvent[]).toReversed()) {
+        if ((m.thread_ts && m.thread_ts !== m.ts) || !m.text?.includes(mention)) continue;
+        const message = this.toMessage({ ...m, type: "app_mention", channel }, { quiet: true });
+        if (message) missed.push(message);
+      }
+    }
+    return missed;
+  }
+
+  /** Replies in followed threads, from the threads active in the last day. */
+  private async missedReplies(): Promise<InboundMessage[]> {
     const since = new Date(Date.now() - CATCH_UP_WINDOW_MS).toISOString();
     const missed: InboundMessage[] = [];
     for (const conversation of this.store.recentConversations(this.name, since, CATCH_UP_THREADS)) {
@@ -105,9 +137,20 @@ export class SlackGateway implements Gateway {
   }
 
   /** https://api.slack.com/authentication/verifying-requests-from-slack */
-  private verify(timestamp: string, signature: string, body: Buffer) {
-    const age = Math.abs(Date.now() / 1000 - Number(timestamp));
-    if (!timestamp || !(age <= MAX_REQUEST_AGE_S)) throw new GatewayError(401, "Stale or missing Slack timestamp.");
+  private verify(headers: GatewayRequest["headers"], body: Buffer) {
+    const timestamp = header(headers, "x-slack-request-timestamp");
+    const signature = header(headers, "x-slack-signature");
+    const age = Math.round(Date.now() / 1000 - Number(timestamp));
+    if (!timestamp || !(Math.abs(age) <= MAX_REQUEST_AGE_S)) {
+      // What Slack sent, so a rejection can be explained (catch-up recovers the message itself).
+      const retry = header(headers, "x-slack-retry-num");
+      log(
+        this.name,
+        `rejected a webhook: timestamp ${timestamp ? `"${timestamp}" (${age}s old)` : "missing"}${retry ? `, retry ${retry} (${header(headers, "x-slack-retry-reason") || "no reason"})` : ""}, from ${header(headers, "user-agent") || "no user agent"}`,
+        "warn",
+      );
+      throw new GatewayError(401, "Stale or missing Slack timestamp.");
+    }
     const expected = `v0=${hmacSha256Hex(this.config.signingSecret, Buffer.concat([Buffer.from(`v0:${timestamp}:`), body]))}`;
     if (!safeEqual(signature, expected)) throw new GatewayError(401, "Invalid Slack signature.");
   }

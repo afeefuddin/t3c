@@ -74,11 +74,49 @@ test("list_threads shows active threads in allowed projects only, and inspect_th
   const run = tools();
   await assert.rejects(run.inspectThread({ threadId: "x1" }), /Use a threadId from list_threads/);
   assert.deepEqual(await run.listThreads(), [
-    { threadId: "x1", title: "Fix Safari header", project: "Demo", status: "running", startedAt: "2026-10-27T10:00:00Z" },
+    { threadId: "x1", title: "Fix Safari header", project: "Demo", status: "running", lastActive: "2026-10-27T10:00:00Z" },
   ]);
   assert.deepEqual(listed, [["p1", { settled: false }]]);
   assert.deepEqual(await run.inspectThread({ threadId: "x1" }), { status: "running", messages: [{ type: "assistant_message", text: "working on x1" }] });
   await assert.rejects(run.inspectThread({ threadId: "elsewhere" }), /Use a threadId from list_threads/);
+});
+
+test("list_threads with a search finds finished threads by title too", async () => {
+  const { t3, tools } = setup(["demo"]);
+  const filters: unknown[] = [];
+  t3.listThreads = async (_projectId, filter) => {
+    filters.push(filter);
+    return [{ threadId: "f1", title: "Fold Unit Mismatch Tickets", status: "completed", settled: true, createdAt: "2026-10-20T10:00:00Z", updatedAt: "2026-10-20T15:00:00Z" }];
+  };
+  const run = tools();
+  assert.deepEqual(await run.listThreads({ search: " fold " }), [
+    { threadId: "f1", title: "Fold Unit Mismatch Tickets", project: "Demo", status: "completed", finished: true, lastActive: "2026-10-20T15:00:00Z" },
+  ]);
+  assert.deepEqual(filters, [{ titleContains: "fold" }]);
+  assert.equal((await run.inspectThread({ threadId: "f1" })).status, "running");
+});
+
+test("send_to_thread messages a thread from list_threads directly and attaches it, once", async () => {
+  const { t3, store, conversation, tools } = setup(["demo"]);
+  t3.listThreads = async () => [{ threadId: "ui1", title: "Fix Live Chat Reply UI", status: "completed", settled: true, createdAt: "2026-10-27T10:00:00Z" }];
+  const run = tools();
+  await assert.rejects(run.sendToThread({ threadId: "ui1", text: "Open a PR." }), /Use a threadId from list_threads/);
+  await assert.rejects(run.sendToThread({ text: "Open a PR." }), /Give the thread's label, or a threadId/);
+  await run.listThreads({ search: "chat" });
+
+  assert.deepEqual(await run.sendToThread({ threadId: "ui1", text: "Commit the fix and open a PR." }), { sent: true, thread: "fix-live-chat-reply-ui" });
+  assert.deepEqual(t3.sends, [{ threadId: "ui1", message: "Commit the fix and open a PR." }]);
+  assert.equal(t3.launches.length, 0); // no go-between thread
+  const attached = store.findThread(conversation.id, "fix-live-chat-reply-ui")!;
+  assert.equal(attached.origin, "attached");
+  assert.equal(attached.t3ThreadId, "ui1");
+  assert.ok(attached.awaitingSince);
+
+  // Later runs reach it by label or id, without attaching it twice; it shows as this conversation's.
+  await tools().sendToThread({ threadId: "ui1", text: "Also add a test." });
+  await tools().sendToThread({ label: "fix-live-chat-reply-ui", text: "Thanks." });
+  assert.equal(store.threads(conversation.id).length, 1);
+  assert.equal((await tools().listThreads({ search: "chat" }))[0].label, "fix-live-chat-reply-ui");
 });
 
 test("list_threads labels this conversation's own threads", async () => {

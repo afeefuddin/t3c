@@ -8,7 +8,7 @@
     "t3c": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('src/agent/skills', 'dist/agent/skills', { recursive: true })\"",
+    "build": "tsc -p tsconfig.build.json && node -e \"const fs = require('node:fs'); fs.rmSync('dist/agent/skills', { recursive: true, force: true }); fs.cpSync('src/agent/skills', 'dist/agent/skills', { recursive: true })\"",
     "prepare": "npm run build",
     "t3c": "node --disable-warning=ExperimentalWarning src/cli.ts",
     "test": "node --test \"test/*.test.ts\"",
