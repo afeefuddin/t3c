@@ -137,15 +137,15 @@ try {
         projects: [values.project],
       })!;
       const conversation = store.getConversation(message.conversationId)!;
-      const result = await new Dispatcher(t3, store, loadConfig()).launch(conversation, {
-        label: "main",
-        project: values.project,
-        title,
-        prompt,
-      });
+      const result = await new Dispatcher(t3, store, loadConfig())
+        .launch(conversation, { label: "main", project: values.project, title, prompt })
+        .finally(() => t3.close())
+        .catch((error) => {
+          store.finishMessage(message.id, errorMessage(error));
+          throw error;
+        });
       store.finishMessage(message.id);
       say.ok(`Started T3 thread ${result.thread.t3ThreadId}.`);
-      await t3.close();
       break;
     }
 

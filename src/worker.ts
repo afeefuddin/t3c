@@ -70,6 +70,12 @@ export class Worker {
   private async drain() {
     for (let message = this.store.nextPending(); message; message = this.store.nextPending()) {
       const conversation = this.store.getConversation(message.conversationId)!;
+      if (!this.gateways.has(conversation.source)) {
+        // e.g. a gateway removed from the config while messages from it were queued.
+        log("t3c", `skipping a message from "${conversation.source}": that gateway isn't configured`, "warn");
+        this.store.finishMessage(message.id, `No gateway "${conversation.source}" is configured.`);
+        continue;
+      }
       const error = await this.locked(conversation.id, async () => {
         this.store.updateConversation(conversation.id, { state: "active" });
         const gateway = this.gateway(conversation.source);

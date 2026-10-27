@@ -140,3 +140,13 @@ test("runs in one conversation never overlap", async () => {
   await worker.idle();
   assert.equal(maxActive, 1);
 });
+
+test("a queued message from a gateway that isn't configured is marked failed, not fatal", async () => {
+  const store = new Store(":memory:");
+  const orphan = store.enqueue(message({ source: "cli", eventKey: "old" }))!;
+  const { t3, worker } = setup({ store });
+  worker.start();
+  await worker.idle();
+  assert.equal(store.getMessage(orphan.id)?.status, "failed");
+  assert.equal(t3.launches.length, 0);
+});
