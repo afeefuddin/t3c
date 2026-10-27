@@ -86,10 +86,11 @@ export class ConversationTools {
   }
 
   /**
-   * Starts a T3 thread for this conversation. The latest request goes in word for word; `brief`
-   * (context the agent gathered) is fenced off as untrusted. Its answer will come back as an event.
+   * Starts a T3 thread for this conversation with the agent's `prompt`, written from the
+   * conversation. Without one (fixed rules), the request goes in word for word with the
+   * conversation fenced off as untrusted. Its answer will come back as an event.
    */
-  startThread(input: { project: string; title: string; brief?: string; label?: string }) {
+  startThread(input: { project: string; title: string; prompt?: string; label?: string }) {
     return this.record("start_thread", input, async () => {
       if (this.launches >= LIMITS.launches) throw new Error(`At most ${LIMITS.launches} threads per run.`);
       const projects = await this.allowedProjects();
@@ -98,7 +99,6 @@ export class ConversationTools {
 
       const { store, conversation, dispatcher } = this.ctx;
       const label = input.label ?? (store.threads(conversation.id).length === 0 ? "main" : slug(project.name));
-      const message = this.latestInbound();
       const preparation = await this.prepare();
       const worktree =
         preparation.worktree?.branch && label !== "main"
@@ -110,7 +110,9 @@ export class ConversationTools {
         label,
         project: project.name,
         title: input.title,
-        prompt: threadPrompt(message, { context: withBrief(input.brief, preparation.context), instructions: preparation.instructions }),
+        prompt: input.prompt
+          ? threadPrompt(input.prompt, { instructions: preparation.instructions })
+          : threadPrompt(this.latestInbound().text, preparation),
         worktree,
       });
       if (result.status === "in_progress") throw new Error(`Thread "${label}" is still starting.`);
@@ -236,10 +238,4 @@ function slug(text: string) {
 function summarize(value: unknown): unknown {
   const json = JSON.stringify(value) ?? "null";
   return json.length > 2_000 ? `${json.slice(0, 2_000)}…` : value;
-}
-
-/** The agent's brief comes first; the full conversation is always kept underneath it. */
-function withBrief(brief: string | undefined, conversation: string | undefined) {
-  if (!brief) return conversation;
-  return conversation ? `${brief}\n\nFull conversation:\n${conversation}` : brief;
 }

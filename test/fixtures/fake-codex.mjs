@@ -35,8 +35,8 @@ if (prompt.includes("<thread-answer>")) {
   const projects = (await call("list_projects")).value.map((p) => p.name);
   // Routes to the project the request mentions, the way a model would.
   const project = projects.find((p) => prompt.toLowerCase().includes(p.toLowerCase())) ?? projects[0];
-  const forbidden = await call("start_thread", { project: "Secret", title: "x" });
-  await call("start_thread", { project, title: "Fix header overlap", brief: "Goal: fix the header on mobile Safari." });
+  const forbidden = await call("start_thread", { project: "Secret", title: "x", prompt: "x" });
+  await call("start_thread", { project, title: "Fix header overlap", prompt: "Fix the header overlapping the page on mobile Safari." });
   await call("update_summary", { summary: `Header bug, working in ${project}. Forbidden attempt: ${forbidden.error}` });
   summary = `started a thread in ${project}`;
   if (mode === "act-then-crash") process.exit(2);

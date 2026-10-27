@@ -73,11 +73,11 @@ function buildServer(tools: ConversationTools) {
   );
   add(
     "start_thread",
-    "Start a T3 coding thread for this conversation. The person's latest request goes to it word for word, followed by your brief. Its answer comes back to you as a new event, so don't wait for it.",
+    "Start a T3 coding thread for this conversation with the prompt you write. The thread sees nothing else: not the conversation, the people or the chat platform. Its answer comes back to you as a new event, so don't wait for it.",
     {
       project: z.string().describe("Project name from list_projects"),
       title: z.string().max(80).describe("Short title: what will change"),
-      brief: z.string().max(20_000).optional().describe("What the coding agent needs from the conversation: goal, details, links, open questions"),
+      prompt: z.string().min(1).max(20_000).describe('The task for the coding agent, self-contained (see "Write the thread prompt")'),
       label: z.string().max(40).optional().describe('Name for this thread within the conversation; defaults to "main" for the first'),
     },
     (i) => tools.startThread(i),
@@ -85,7 +85,10 @@ function buildServer(tools: ConversationTools) {
   add(
     "send_to_thread",
     "Send a follow-up to a thread in this conversation; a busy thread picks it up too. Its answer comes back to you as a new event.",
-    { label: z.string().describe("The thread's label"), text: z.string().max(20_000) },
+    {
+      label: z.string().describe("The thread's label"),
+      text: z.string().max(20_000).describe("Your message to the coding agent, written for it: what changes and why, not the chat verbatim"),
+    },
     (i) => tools.sendToThread(i),
   );
   add(

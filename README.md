@@ -70,7 +70,9 @@ Without the agent, fixed rules apply:
 
 With `t3c agent codex`, each event wakes Codex once, with tools scoped to that conversation.
 Events are a new message, or a T3 thread that finished.
-- **Starting work:** it reads the Slack thread or issue, picks the project, and writes a brief.
+- **Starting work:** it reads the Slack thread or issue, picks the project, and writes the
+  thread a self-contained prompt: the task, what's known, links, and what done means. No chat
+  transcript, user IDs or mentions.
 - **Choosing threads:** it can start several threads (one per project) or ask which project
   you mean.
 - **Answering:** status questions get a short reply without disturbing the thread. When a thread

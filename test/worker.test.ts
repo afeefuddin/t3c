@@ -21,7 +21,7 @@ test("a message launches a thread with its context, acknowledges, and relays the
   await worker.idle();
 
   assert.equal(t3.launches.length, 1);
-  assert.match(t3.launches[0].message, /^fix the login bug\n\n---\nRequested via chat by alice\./);
+  assert.match(t3.launches[0].message, /^fix the login bug\n\nWork autonomously\./);
   assert.match(t3.launches[0].message, /<conversation>\nbob: it 404s\n<\/conversation>$/);
   assert.deepEqual(t3.launches[0].workspaceStrategy, { type: "worktree", baseRef: "main", branch: "b" });
   assert.deepEqual(gateway.acks, ["e1"]);

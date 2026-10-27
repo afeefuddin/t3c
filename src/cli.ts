@@ -37,7 +37,7 @@ ${color("bold", "Set up")} (once, in this order)
   t3c remove slack [channel-id] | github <owner/repo> | http
   t3c model                      pick the model T3 threads use
   t3c mode [<mode>]              what threads may do: approval-required | auto-accept-edits | auto | full-access
-  t3c agent codex [--model <m>]  let Codex decide (project, briefs, follow-ups)
+  t3c agent codex [--model <m>]  let Codex decide (project, thread prompts, follow-ups)
   t3c agent off                  back to fixed rules
 
 ${color("bold", "Run")}

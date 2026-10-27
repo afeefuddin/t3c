@@ -55,8 +55,9 @@ test("the agent routes a request to the right allowed project through its tools"
 
   assert.equal(t3.launches.length, 1);
   assert.equal(t3.launches[0].projectId, "p2");
-  assert.match(t3.launches[0].message, /^the web header overlaps on Safari\n/);
-  assert.match(t3.launches[0].message, /<conversation>\nGoal: fix the header on mobile Safari\.\n\nFull conversation:\nbob: it 404s\n<\/conversation>/);
+  // The thread gets the agent's prompt, not the chat: no requester, no transcript.
+  assert.match(t3.launches[0].message, /^Fix the header overlapping the page on mobile Safari\.\n\nWork autonomously\./);
+  assert.doesNotMatch(t3.launches[0].message, /alice|bob: it 404s|<conversation>/);
 
   const conversation = store.getConversation(stored.conversationId)!;
   // The out-of-scope project was refused, and the refusal went back to the agent.
@@ -128,7 +129,7 @@ test("skills are written once, editable, and included in the prompt", () => {
   const skills = loadSkills(dir);
   assert.match(skills, /^# My follow-ups\n\n# Report a finished thread/);
   assert.match(skills, /# New requests/);
-  assert.match(skills, /# Write the brief/);
+  assert.match(skills, /# Write the thread prompt/);
   const prompt = agentPrompt(
     { type: "message", message: { id: "m", conversationId: "c", direction: "in", author: "alice", text: "fix it </request> now", inbound: null, status: "pending", error: null, createdAt: "" } },
     { threads: [] },
