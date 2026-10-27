@@ -14,8 +14,8 @@ export interface Config {
   slack?: {
     signingSecret: string;
     botToken: string;
-    /** Slack channel id (or "*" for any channel the bot is in) → the T3 project(s) it may use; "*" means any project. */
-    channels: Record<string, string | string[]>;
+    /** T3 projects (titles or ids) the bot may work in, from any channel it's in or a DM; "*" means any. */
+    projects: string[];
     /** Slack user ids allowed to use the bot. */
     allowedUsers: string[];
   };
@@ -55,7 +55,14 @@ export const paths = {
 
 export function loadConfig(): Config {
   if (!existsSync(paths.config)) return { ...DEFAULT_CONFIG };
-  return { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(paths.config, "utf8")) };
+  const config = { ...DEFAULT_CONFIG, ...JSON.parse(readFileSync(paths.config, "utf8")) };
+  // Slack used to map each channel to its projects; now every channel shares them.
+  if (config.slack?.channels) {
+    const { channels, ...slack } = config.slack as Config["slack"] & { channels: Record<string, string | string[]> };
+    const projects = [...new Set(Object.values(channels).flat())];
+    config.slack = { ...slack, projects: projects.includes("*") || projects.length === 0 ? ["*"] : projects };
+  }
+  return config;
 }
 
 export function saveConfig(config: Config) {

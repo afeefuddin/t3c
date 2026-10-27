@@ -31,10 +31,10 @@ const USAGE = `${color("bold", "t3c")} — start T3 Code threads from Slack, Git
 
 ${color("bold", "Set up")} (once, in this order)
   t3c login                      connect t3c to T3 Code
-  t3c add slack                  connect Slack, or add another channel
+  t3c add slack                  connect Slack, or update its app and settings
   t3c add github <owner/repo>    let /t3c comments in a repo start work
   t3c add http                   an authenticated webhook for scripts
-  t3c remove slack [channel-id] | github <owner/repo> | http
+  t3c remove slack | github <owner/repo> | http
   t3c model                      pick the model T3 threads use
   t3c mode [<mode>]              what threads may do: approval-required | auto-accept-edits | auto | full-access
   t3c agent codex [--model <m>]  let Codex decide (project, thread prompts, follow-ups)
@@ -293,7 +293,7 @@ async function agent(provider: string | undefined) {
   if (provider === "off") {
     delete config.agent;
     saveConfig(config);
-    say.ok("Agent off: messages follow the fixed rules (channel project, follow-ups to the latest thread).");
+    say.ok("Agent off: messages follow the fixed rules (the configured project, follow-ups to the latest thread).");
   } else if (provider === "codex") {
     try {
       execFileSync("codex", ["login", "status"], { stdio: "ignore" });

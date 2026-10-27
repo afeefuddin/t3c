@@ -7,13 +7,14 @@ import { Store } from "../src/store.ts";
 const BOT = "UBOT";
 const SECRET = "slack-signing-secret";
 
-async function setup(channels: Record<string, string | string[]> = { C1: "demo", C2: ["demo", "web"] }) {
+async function setup({ projects = ["demo"], member = ["C1", "C2", "D1"] } = {}) {
   const store = new Store(":memory:");
   const calls: { method: string; args: Record<string, string> }[] = [];
   const history: SlackEvent[] = [];
   const slack = async (method: string, args: Record<string, string> = {}) => {
     calls.push({ method, args });
     if (method === "auth.test") return { user_id: BOT };
+    if (method === "users.conversations") return { channels: member.map((id) => ({ id })) };
     if (method === "conversations.replies") return { messages: history.filter((m) => (m.thread_ts ?? m.ts) === args.ts) };
     if (method === "conversations.history") {
       // Top-level messages (and thread broadcasts) in the channel after `oldest`, newest first.
@@ -23,7 +24,7 @@ async function setup(channels: Record<string, string | string[]> = { C1: "demo",
     return {};
   };
   const gateway = new SlackGateway(
-    { signingSecret: SECRET, botToken: "xoxb", channels, allowedUsers: ["UALICE"] },
+    { signingSecret: SECRET, botToken: "xoxb", projects, allowedUsers: ["UALICE"] },
     { store, slack },
   );
   await gateway.init();
@@ -78,9 +79,19 @@ test("a mention becomes a message for the Slack thread", async () => {
   });
 });
 
-test("channels can allow several projects", async () => {
-  const { gateway } = await setup();
-  assert.deepEqual(gateway.receive(eventCallback({ channel: "C2" })).message?.projects, ["demo", "web"]);
+test("any channel the bot is in works, with the configured projects", async () => {
+  const { gateway } = await setup({ projects: ["demo", "web"] });
+  assert.deepEqual(gateway.receive(eventCallback({ channel: "CNEW" })).message?.projects, ["demo", "web"]);
+});
+
+test("in a DM every message is a request, mention or not, and replies in its Slack thread follow up", async () => {
+  const { gateway, store } = await setup();
+  const dm = (event: Partial<SlackEvent>, id: string) => gateway.receive(eventCallback({ type: "message", channel: "D1", ...event }, id)).message;
+  const first = dm({ text: "merge #4351" }, "Ev1")!;
+  assert.deepEqual([first.conversationId, first.text], ["D1:100.1", "merge #4351"]);
+  store.enqueue(first);
+  assert.equal(dm({ ts: "100.2", thread_ts: "100.1", text: "and deploy it" }, "Ev2")?.conversationId, "D1:100.1");
+  assert.equal(dm({ ts: "100.3", text: `<@${BOT}> check the build` }, "Ev3")?.text, "check the build");
 });
 
 test("plain replies count only in Slack threads that already have a T3 thread", async () => {
@@ -99,13 +110,12 @@ test("ignores the duplicate message event for a mention, bots and edits", async 
   assert.equal(gateway.receive(eventCallback({ subtype: "message_changed" })).message, undefined);
 });
 
-test("users off the allowlist and unmapped channels get a notice, not work", async () => {
+test("users off the allowlist get a notice, not work, in channels and DMs", async () => {
   const { gateway, posts } = await setup();
   assert.equal(gateway.receive(eventCallback({ user: "UMALLORY" })).message, undefined);
-  assert.equal(gateway.receive(eventCallback({ channel: "C9" })).message, undefined);
+  assert.equal(gateway.receive(eventCallback({ type: "message", channel: "D9", user: "UMALLORY", text: "hi" }, "Ev2")).message, undefined);
   await new Promise((r) => setImmediate(r));
-  assert.match(posts()[0].text, /isn't allowed/);
-  assert.match(posts()[1].text, /isn't connected to a T3 project/);
+  assert.deepEqual(posts().map((p) => [p.channel, /isn't allowed/.test(p.text)]), [["C1", true], ["D9", true]]);
 });
 
 test("prepare collects the earlier Slack thread messages", async () => {
@@ -137,7 +147,7 @@ test("prepare reads the whole thread across pages, with names instead of ids", a
   const names: Record<string, string> = { UBOB: "Bob", UCAROL: "Carol" };
   const lookups: string[] = [];
   const gateway = new SlackGateway(
-    { signingSecret: SECRET, botToken: "xoxb", channels: { C1: "demo" }, allowedUsers: ["UALICE"] },
+    { signingSecret: SECRET, botToken: "xoxb", projects: ["demo"], allowedUsers: ["UALICE"] },
     {
       store: new Store(":memory:"),
       slack: async (method, args = {}) => {
@@ -165,8 +175,11 @@ test("replies go into the Slack thread as mrkdwn", async () => {
   assert.deepEqual(posts(), [{ channel: "C1", thread_ts: "100.1", text: "*Done*" }]);
 });
 
-test("the manifest points Slack at this machine's hook", () => {
+test("the manifest points Slack at this machine's hook and lets people DM the bot", () => {
   const manifest = slackManifest("https://laptop.tail1.ts.net:10000", "mybot");
+  assert.ok(manifest.settings.event_subscriptions.bot_events.includes("message.im"));
+  assert.ok(manifest.oauth_config.scopes.bot.includes("im:history"));
+  assert.equal(manifest.features.app_home.messages_tab_enabled, true);
   assert.equal(manifest.settings.event_subscriptions.request_url, "https://laptop.tail1.ts.net:10000/hooks/slack");
   assert.equal(manifest.features.bot_user.display_name, "mybot");
   assert.equal(manifest.settings.socket_mode_enabled, false);
@@ -174,12 +187,6 @@ test("the manifest points Slack at this machine's hook", () => {
 
 test("converts common Markdown to Slack mrkdwn", () => {
   assert.equal(toSlackMarkdown("## Fixed\n**bold** and [PR](https://x.y/1)"), "*Fixed*\n*bold* and <https://x.y/1|PR>");
-});
-
-test('with "*", any channel the bot is in works, and channels of their own keep their projects', async () => {
-  const { gateway } = await setup({ "*": ["web"], C1: "demo" });
-  assert.deepEqual(gateway.receive(eventCallback({ channel: "CNEW" })).message?.projects, ["web"]);
-  assert.deepEqual(gateway.receive(eventCallback({ channel: "C1" }, "Ev2")).message?.projects, ["demo"]);
 });
 
 test("a message that was already handled (Slack's retry) is skipped", async () => {
@@ -223,6 +230,8 @@ test("catch-up recovers a new mention whose webhook was lost or rejected, once, 
     { type: "message", channel: "C1", ts: ts(-2), user: "UALICE", text: "chatter without a mention" },
     { type: "message", channel: "C1", ts: ts(-3), thread_ts: ts(-1), user: "UALICE", text: `<@${BOT}> a reply` },
     { type: "message", channel: "C2", ts: ts(-4), user: "UMALLORY", text: `<@${BOT}> push to main` },
+    // In a DM, no mention is needed.
+    { type: "message", channel: "D1", ts: ts(-5), user: "UALICE", text: "merge #4351" },
   );
 
   // Slack's delivery is rejected (here: a stale timestamp)...
@@ -236,6 +245,7 @@ test("catch-up recovers a new mention whose webhook was lost or rejected, once, 
   const missed = await gateway.catchUp();
   assert.deepEqual(missed.map((m) => [m.eventKey, m.conversationId, m.text]), [
     [`C1:${ts(-1)}`, `C1:${ts(-1)}`, "we have to improve the fold tickets"],
+    [`D1:${ts(-5)}`, `D1:${ts(-5)}`, "merge #4351"],
   ]);
   assert.deepEqual(posts(), []);
   for (const m of missed) store.enqueue(m);

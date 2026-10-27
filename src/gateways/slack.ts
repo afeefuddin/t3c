@@ -21,6 +21,9 @@ export interface SlackEvent {
 const CATCH_UP_WINDOW_MS = 24 * 60 * 60_000;
 const CATCH_UP_THREADS = 10;
 
+/** How long the list of channels the bot is in is reused by catch-up. */
+const CHANNELS_TTL_MS = 5 * 60_000;
+
 /** Earlier thread messages passed along as context, at most. */
 const MAX_CONTEXT_MESSAGES = 300;
 
@@ -46,8 +49,9 @@ export function slackApi(token: string): SlackCall {
 }
 
 /**
- * Slack ⇄ T3 over the Events API. Mentioning the bot in a mapped channel starts a T3 thread;
- * replies in that Slack thread become follow-ups; answers are posted back into the Slack thread.
+ * Slack ⇄ T3 over the Events API. Mentioning the bot in any channel it's in, or any message in a
+ * DM with it, starts a T3 thread; replies in that Slack thread become follow-ups; answers are
+ * posted back into the Slack thread.
  */
 export class SlackGateway implements Gateway {
   readonly name = "slack";
@@ -58,6 +62,7 @@ export class SlackGateway implements Gateway {
   /** Messages after this were sent while t3c was running, so any it doesn't have were lost. */
   private readonly startedAt = Date.now() / 1000;
   private readonly names = new Map<string, Promise<string>>();
+  private channels?: { ids: string[]; at: number };
 
   constructor(config: SlackConfig, deps: { store: Store; slack?: SlackCall }) {
     this.config = config;
@@ -85,35 +90,60 @@ export class SlackGateway implements Gateway {
 
   /**
    * Messages Slack never delivered, or delivered in a way t3c had to reject: Slack drops a webhook
-   * now and then, and none arrive while this machine is asleep or t3c is down. Covers new mentions
-   * in the connected channels and replies in followed threads.
+   * now and then, and none arrive while this machine is asleep or t3c is down. Covers new requests
+   * in the channels and DMs the bot is in, and replies in followed threads.
    */
   async catchUp(): Promise<InboundMessage[]> {
     return [...(await this.missedMentions()), ...(await this.missedReplies())];
   }
 
   /**
-   * New top-level mentions in each connected channel since t3c was first seen working there (or
-   * started), at most a day back, so mentions from before t3c was connected aren't replayed.
-   * Channels connected through "*" aren't listed in the config, so they aren't covered.
+   * New top-level requests (mentions, or any message in a DM) in each channel the bot is in since
+   * t3c was first seen working there (or started), at most a day back, so requests from before
+   * t3c was there aren't replayed.
    */
   private async missedMentions(): Promise<InboundMessage[]> {
     const mention = `<@${this.botUserId}>`;
     const missed: InboundMessage[] = [];
-    for (const channel of Object.keys(this.config.channels)) {
-      if (channel === ANY_CHANNEL) continue;
+    for (const channel of await this.memberChannels()) {
       const firstSeen = this.store.firstInboundAt(this.name, `${channel}:`);
       const live = Math.min(this.startedAt, firstSeen ? Date.parse(firstSeen) / 1000 : Infinity);
       const oldest = Math.max(live, Date.now() / 1000 - CATCH_UP_WINDOW_MS / 1000);
       const { messages } = await this.slack("conversations.history", { channel, oldest: oldest.toFixed(6), limit: "100" });
       // Newest first from Slack; handled oldest first.
       for (const m of (messages as SlackEvent[]).toReversed()) {
-        if ((m.thread_ts && m.thread_ts !== m.ts) || !m.text?.includes(mention)) continue;
-        const message = this.toMessage({ ...m, type: "app_mention", channel }, { quiet: true });
+        if (m.thread_ts && m.thread_ts !== m.ts) continue;
+        if (!isDm(channel) && !m.text?.includes(mention)) continue;
+        const message = this.toMessage({ ...m, type: isDm(channel) ? "message" : "app_mention", channel }, { quiet: true });
         if (message) missed.push(message);
       }
     }
     return missed;
+  }
+
+  /**
+   * Channels, private channels and DMs the bot is in, refreshed every few minutes. An app installed
+   * before DMs were supported lacks the im:read scope until it's reinstalled: channels only, then.
+   */
+  private async memberChannels(): Promise<string[]> {
+    if (this.channels && Date.now() - this.channels.at < CHANNELS_TTL_MS) return this.channels.ids;
+    const ids = await this.listChannels("public_channel,private_channel,im").catch((error) => {
+      if (!/missing_scope/.test(errorMessage(error))) throw error;
+      return this.listChannels("public_channel,private_channel");
+    });
+    this.channels = { ids, at: Date.now() };
+    return ids;
+  }
+
+  private async listChannels(types: string): Promise<string[]> {
+    const ids: string[] = [];
+    let cursor = "";
+    do {
+      const page = await this.slack("users.conversations", { types, limit: "200", ...(cursor ? { cursor } : {}) });
+      ids.push(...(page.channels as { id: string }[]).map((c) => c.id));
+      cursor = page.response_metadata?.next_cursor ?? "";
+    } while (cursor);
+    return ids;
   }
 
   /** Replies in followed threads, from the threads active in the last day. */
@@ -164,7 +194,9 @@ export class SlackGateway implements Gateway {
     const rootTs = event.thread_ts ?? event.ts;
     const conversationId = `${event.channel}:${rootTs}`;
     const conversation = this.store.findConversation(this.name, conversationId);
-    if (event.type === "message") {
+    // In a DM every message is for the bot, and Slack sends no app_mention there.
+    const dm = isDm(event.channel);
+    if (event.type === "message" && !dm) {
       // A mention arrives as both app_mention and message; app_mention handles it.
       // Plain messages only matter as replies in a Slack thread that already has a T3 thread.
       if (event.text.includes(mention) || !event.thread_ts || !conversation) return;
@@ -174,14 +206,12 @@ export class SlackGateway implements Gateway {
 
     const notice = (text: string): undefined => {
       if (quiet) return;
-      if (event.type === "app_mention") void this.post(event.channel, rootTs, text).catch((e) => log(this.name, `couldn't post a notice: ${errorMessage(e)}`, "warn"));
+      if (event.type === "app_mention" || dm) void this.post(event.channel, rootTs, text).catch((e) => log(this.name, `couldn't post a notice: ${errorMessage(e)}`, "warn"));
     };
     if (!this.config.allowedUsers.includes(event.user)) {
       if (!quiet) log(this.name, `ignored ${event.user} in ${event.channel}: not on the allowlist`, "warn");
       return notice(`<@${event.user}> isn't allowed to use t3c.`);
     }
-    const projects = this.config.channels[event.channel] ?? this.config.channels[ANY_CHANNEL];
-    if (!projects) return notice("This channel isn't connected to a T3 project. Run `t3c add slack` to connect it.");
     const text = event.text.replaceAll(mention, "").trim();
     if (!text) return notice("What should I work on?");
 
@@ -193,7 +223,7 @@ export class SlackGateway implements Gateway {
       user: `<@${event.user}>`,
       text,
       title: firstLine(text),
-      projects: [projects].flat(),
+      projects: this.config.projects,
       meta: { channel: event.channel, ts: event.ts, ...(event.thread_ts ? { threadTs: event.thread_ts } : {}) },
     };
   }
@@ -273,13 +303,19 @@ export function slackChallenge(body: Buffer): string | undefined {
   } catch {}
 }
 
-/** Channels key for every channel the bot is in that has no entry of its own. */
-export const ANY_CHANNEL = "*";
+/** DM channel ids start with D. */
+function isDm(channel: string) {
+  return channel.startsWith("D");
+}
 
 export function slackManifest(publicUrl: string, name = "t3bot") {
   return {
     display_information: { name, description: "Starts T3 Code threads from Slack.", background_color: "#1f2328" },
-    features: { bot_user: { display_name: name, always_online: true } },
+    features: {
+      bot_user: { display_name: name, always_online: true },
+      // Lets people DM the bot from its Messages tab.
+      app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false },
+    },
     oauth_config: {
       scopes: {
         bot: [
@@ -288,6 +324,8 @@ export function slackManifest(publicUrl: string, name = "t3bot") {
           "channels:read",
           "groups:history",
           "groups:read",
+          "im:history",
+          "im:read",
           "chat:write",
           "reactions:write",
           "users:read",
@@ -297,7 +335,7 @@ export function slackManifest(publicUrl: string, name = "t3bot") {
     settings: {
       event_subscriptions: {
         request_url: new URL("/hooks/slack", publicUrl).toString(),
-        bot_events: ["app_mention", "message.channels", "message.groups"],
+        bot_events: ["app_mention", "message.channels", "message.groups", "message.im"],
       },
       org_deploy_enabled: false,
       socket_mode_enabled: false,

@@ -25,8 +25,17 @@ test("status describes each gateway in one line", () => {
   const lines = describeGateways({
     port: 1,
     runtimeMode: "auto",
-    slack: { signingSecret: "s", botToken: "b", channels: { C1: "demo" }, allowedUsers: ["U1"] },
+    slack: { signingSecret: "s", botToken: "b", projects: ["demo"], allowedUsers: ["U1"] },
     github: { webhookSecret: "s", repos: { "a/b": "demo" }, allowedUsers: ["a"] },
   });
-  assert.deepEqual(lines, ["slack   C1→demo; 1 allowed user(s)", "github  a/b→demo; allowed: a"]);
+  assert.deepEqual(lines, ["slack   any channel or DM→demo; 1 allowed user(s)", "github  a/b→demo; allowed: a"]);
+});
+
+test("a Slack config from per-channel days keeps its projects, now for every channel", () => {
+  const legacy = (channels: Record<string, string | string[]>) => {
+    saveConfig({ ...loadConfig(), slack: { signingSecret: "s", botToken: "b", channels, allowedUsers: ["U1"] } as any });
+    return loadConfig().slack;
+  };
+  assert.deepEqual(legacy({ C1: "demo", C2: ["demo", "web"] }), { signingSecret: "s", botToken: "b", projects: ["demo", "web"], allowedUsers: ["U1"] });
+  assert.deepEqual(legacy({ C1: "demo", "*": "*" })?.projects, ["*"]);
 });
