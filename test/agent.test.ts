@@ -56,7 +56,7 @@ test("the agent routes a request to the right allowed project through its tools"
   assert.equal(t3.launches.length, 1);
   assert.equal(t3.launches[0].projectId, "p2");
   assert.match(t3.launches[0].message, /^the web header overlaps on Safari\n/);
-  assert.match(t3.launches[0].message, /<conversation>\nGoal: fix the header on mobile Safari\.\n<\/conversation>/);
+  assert.match(t3.launches[0].message, /<conversation>\nGoal: fix the header on mobile Safari\.\n\nFull conversation:\nbob: it 404s\n<\/conversation>/);
 
   const conversation = store.getConversation(stored.conversationId)!;
   // The out-of-scope project was refused, and the refusal went back to the agent.

@@ -105,7 +105,7 @@ export class ConversationTools {
         label,
         project: project.name,
         title: input.title,
-        prompt: threadPrompt(message, { context: input.brief ?? preparation.context, instructions: preparation.instructions }),
+        prompt: threadPrompt(message, { context: withBrief(input.brief, preparation.context), instructions: preparation.instructions }),
         worktree,
       });
       if (result.status === "in_progress") throw new Error(`Thread "${label}" is still starting.`);
@@ -222,4 +222,10 @@ function slug(text: string) {
 function summarize(value: unknown): unknown {
   const json = JSON.stringify(value) ?? "null";
   return json.length > 2_000 ? `${json.slice(0, 2_000)}…` : value;
+}
+
+/** The agent's brief comes first; the full conversation is always kept underneath it. */
+function withBrief(brief: string | undefined, conversation: string | undefined) {
+  if (!brief) return conversation;
+  return conversation ? `${brief}\n\nFull conversation:\n${conversation}` : brief;
 }

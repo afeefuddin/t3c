@@ -110,7 +110,48 @@ test("prepare collects the earlier Slack thread messages", async () => {
     { type: "message", channel: "C1", ts: "100.1", user: "UALICE", text: `<@${BOT}> fix this` },
   );
   const { message } = gateway.receive(eventCallback({ thread_ts: "90.0", text: `<@${BOT}> fix this` }));
-  assert.deepEqual(await gateway.prepare(message!), { context: "<@UBOB>: login redirects to /404" });
+  assert.deepEqual(await gateway.prepare(message!), { context: "@UBOB: login redirects to /404" });
+});
+
+test("prepare reads the whole thread across pages, with names instead of ids", async () => {
+  const pages: Record<string, { messages: SlackEvent[]; response_metadata?: { next_cursor: string } }> = {
+    "": {
+      messages: [
+        { type: "message", channel: "C1", ts: "90.0", user: "UBOB", text: "login redirects to /404" },
+        { type: "message", channel: "C1", ts: "91.0", user: "UCAROL", text: "<@UBOB> only on Safari?" },
+      ],
+      response_metadata: { next_cursor: "page2" },
+    },
+    page2: {
+      messages: [
+        { type: "message", channel: "C1", ts: "92.0", bot_id: "B1", text: "build failed" },
+        { type: "message", channel: "C1", ts: "100.1", user: "UALICE", text: `<@${BOT}> fix this` },
+      ],
+    },
+  };
+  const names: Record<string, string> = { UBOB: "Bob", UCAROL: "Carol" };
+  const lookups: string[] = [];
+  const gateway = new SlackGateway(
+    { signingSecret: SECRET, botToken: "xoxb", channels: { C1: "demo" }, allowedUsers: ["UALICE"] },
+    {
+      store: new Store(":memory:"),
+      slack: async (method, args = {}) => {
+        if (method === "auth.test") return { user_id: BOT };
+        if (method === "conversations.replies") return pages[args.cursor ?? ""];
+        if (method === "users.info") {
+          lookups.push(args.user);
+          return { user: { profile: { display_name: names[args.user] } } };
+        }
+        return {};
+      },
+    },
+  );
+  await gateway.init();
+  const { message } = gateway.receive(eventCallback({ thread_ts: "90.0", text: `<@${BOT}> fix this` }));
+  assert.deepEqual(await gateway.prepare(message!), {
+    context: "@Bob: login redirects to /404\n@Carol: @Bob only on Safari?\na bot: build failed",
+  });
+  assert.deepEqual(lookups.sort(), ["UBOB", "UCAROL"]);
 });
 
 test("replies go into the Slack thread as mrkdwn", async () => {

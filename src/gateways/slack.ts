@@ -17,6 +17,9 @@ export interface SlackEvent {
   text?: string;
 }
 
+/** Earlier thread messages passed along as context, at most. */
+const MAX_CONTEXT_MESSAGES = 300;
+
 export type SlackCall = (method: string, args?: Record<string, string>) => Promise<any>;
 
 /** Slack rejects replays older than this; so do we. */
@@ -48,6 +51,7 @@ export class SlackGateway implements Gateway {
   private readonly store: Store;
   private readonly slack: SlackCall;
   private botUserId = "";
+  private readonly names = new Map<string, Promise<string>>();
 
   constructor(config: SlackConfig, deps: { store: Store; slack?: SlackCall }) {
     this.config = config;
@@ -114,12 +118,50 @@ export class SlackGateway implements Gateway {
     };
   }
 
+  /** The whole Slack thread before this message, with people's names, as context. */
   async prepare(message: InboundMessage) {
     const { channel, ts, threadTs } = message.meta!;
     if (!threadTs) return {};
-    const { messages } = await this.slack("conversations.replies", { channel, ts: threadTs, limit: "100" });
-    const earlier = (messages as SlackEvent[]).filter((m) => m.ts !== ts && m.text);
-    return earlier.length > 0 ? { context: earlier.map((m) => `<@${m.user ?? m.bot_id}>: ${m.text}`).join("\n") } : {};
+    const earlier: SlackEvent[] = [];
+    let cursor = "";
+    do {
+      const page = await this.slack("conversations.replies", { channel, ts: threadTs, limit: "200", ...(cursor ? { cursor } : {}) });
+      earlier.push(...(page.messages as SlackEvent[]).filter((m) => m.ts !== ts && m.text));
+      cursor = page.response_metadata?.next_cursor ?? "";
+    } while (cursor && earlier.length < MAX_CONTEXT_MESSAGES * 2);
+    if (earlier.length === 0) return {};
+
+    // Very long threads keep their opening message and the most recent ones.
+    const kept =
+      earlier.length <= MAX_CONTEXT_MESSAGES
+        ? earlier
+        : [earlier[0], { ts: "", text: `(${earlier.length - MAX_CONTEXT_MESSAGES} messages omitted)` } as SlackEvent, ...earlier.slice(-(MAX_CONTEXT_MESSAGES - 1))];
+    const lines = await Promise.all(kept.map(async (m) => (m.ts ? `${await this.author(m)}: ${await this.withNames(m.text!)}` : m.text!)));
+    return { context: lines.join("\n") };
+  }
+
+  private author(m: SlackEvent) {
+    if (m.user) return this.userName(m.user);
+    return Promise.resolve(m.bot_id ? "a bot" : "someone");
+  }
+
+  /** <@U123> → @name, so the agent reads who is being addressed. */
+  private async withNames(text: string) {
+    const ids = [...new Set([...text.matchAll(/<@([A-Z0-9]+)>/g)].map((m) => m[1]))];
+    const names = new Map(await Promise.all(ids.map(async (id) => [id, await this.userName(id)] as const)));
+    return text.replace(/<@([A-Z0-9]+)>/g, (_, id) => names.get(id) ?? `<@${id}>`);
+  }
+
+  /** "@Display Name", looked up once per user; the raw id if Slack won't say. */
+  private userName(id: string): Promise<string> {
+    let name = this.names.get(id);
+    if (!name) {
+      name = this.slack("users.info", { user: id })
+        .then(({ user }) => `@${user?.profile?.display_name || user?.real_name || user?.name || id}`)
+        .catch(() => `<@${id}>`);
+      this.names.set(id, name);
+    }
+    return name;
   }
 
   async acknowledge(message: InboundMessage) {

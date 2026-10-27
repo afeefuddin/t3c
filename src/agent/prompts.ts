@@ -48,8 +48,8 @@ function describeEvent(event: AgentEvent): string {
 }
 
 /**
- * The first prompt of a thread: the request word for word, then the context (the conversation,
- * or the agent's brief of it) fenced off, so instructions hidden in it carry less weight.
+ * The first prompt of a thread: the request word for word, then the context (the agent's brief, if
+ * any, and the conversation) fenced off, so instructions hidden in it carry less weight.
  */
 export function threadPrompt(message: InboundMessage, { context, instructions }: Preparation): string {
   const parts = [message.text, "", "---", `Requested via ${message.source} by ${message.user}.`];
