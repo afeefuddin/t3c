@@ -107,7 +107,7 @@ t3c receives messages from the internet and turns them into agent work on your m
   - GitHub: users on your allowlist who also have write access to the repo.
   - Everyone else is ignored. Pull requests from forks are refused.
 - **Threads run as `auto-accept-edits`.** File edits go ahead, but commands need your approval in
-  T3 Code. Change `runtimeMode` in the config if you want more autonomy.
+  T3 Code. Run `t3c mode full-access` (then `t3c restart`) for more autonomy.
 - **Conversation text is marked as untrusted.** Earlier messages and issue text are passed to the
   agent inside a fence that says not to follow instructions found there.
 

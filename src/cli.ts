@@ -18,7 +18,7 @@ import { color, errorMessage, log, preview } from "./log.ts";
 import { createApp } from "./server.ts";
 import { addGithub, addHttp, addSlack, chooseModel, githubToken, remove } from "./setup.ts";
 import { Store } from "./store.ts";
-import { T3Client } from "./t3.ts";
+import { RUNTIME_MODES, type RuntimeMode, T3Client } from "./t3.ts";
 import { say } from "./ui.ts";
 import { Worker } from "./worker.ts";
 
@@ -31,6 +31,7 @@ ${color("bold", "Set up")} (once, in this order)
   t3c add http                   an authenticated webhook for scripts
   t3c remove slack [channel-id] | github <owner/repo> | http
   t3c model                      pick the model T3 threads use
+  t3c mode [<mode>]              what threads may do: approval-required | auto-accept-edits | auto | full-access
   t3c agent codex [--model <m>]  let Codex decide (project, briefs, follow-ups)
   t3c agent off                  back to fixed rules
 
@@ -78,6 +79,20 @@ try {
       else if (rest[0] === "http") addHttp();
       else throw new Error("Usage: t3c add slack | github <owner/repo> | http");
       break;
+
+    case "mode": {
+      const mode = rest[0] as RuntimeMode | undefined;
+      if (!mode) {
+        say.info(`Threads run as ${loadConfig().runtimeMode}. Change it with \`t3c mode <${RUNTIME_MODES.join("|")}>\`.`);
+        break;
+      }
+      if (!RUNTIME_MODES.includes(mode)) throw new Error(`Usage: t3c mode <${RUNTIME_MODES.join("|")}>`);
+      saveConfig({ ...loadConfig(), runtimeMode: mode });
+      say.ok(`Threads started by t3c will run as ${mode}.`);
+      if (mode === "full-access") say.warn("Full access: an agent started from Slack or GitHub can run any command on this machine without asking.");
+      say.hint("t3c logs in to T3 again by itself for the new mode. Changes apply after `t3c restart`.");
+      break;
+    }
 
     case "model":
       await chooseModel();
