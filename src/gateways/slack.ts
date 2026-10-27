@@ -1,6 +1,18 @@
 import type { Config } from "../config.ts";
 import { errorMessage, log } from "../log.ts";
-import { type Gateway, GatewayError, type GatewayRequest, header, hmacSha256Hex, type InboundMessage, PROBE_USER_AGENT, type Received, safeEqual } from "../gateway.ts";
+import {
+  type FileRef,
+  type Gateway,
+  GatewayError,
+  type GatewayRequest,
+  header,
+  hmacSha256Hex,
+  type InboundMessage,
+  type Preparation,
+  PROBE_USER_AGENT,
+  type Received,
+  safeEqual,
+} from "../gateway.ts";
 import type { Store } from "../store.ts";
 
 export type SlackConfig = NonNullable<Config["slack"]>;
@@ -15,7 +27,47 @@ export interface SlackEvent {
   bot_id?: string;
   subtype?: string;
   text?: string;
+  /** Uploaded files: screenshots, logs, PDFs, snippets. */
+  files?: SlackFile[];
+  /** Link previews, forwarded messages and bot cards (CI, Sentry, …). */
+  attachments?: SlackAttachment[];
+  /** Block Kit layout; bots often put everything here and leave `text` short. */
+  blocks?: SlackBlock[];
 }
+
+export interface SlackFile {
+  name?: string;
+  title?: string;
+  mimetype?: string;
+  size?: number;
+  url_private?: string;
+  url_private_download?: string;
+  /** "tombstone" for deleted files, "hidden_by_limit" past a free plan's history. */
+  mode?: string;
+}
+
+interface SlackAttachment {
+  pretext?: string;
+  author_name?: string;
+  title?: string;
+  title_link?: string;
+  text?: string;
+  fields?: { title?: string; value?: string }[];
+  footer?: string;
+  fallback?: string;
+  /** A forwarded message's own files. */
+  files?: SlackFile[];
+}
+
+interface SlackBlock {
+  type: string;
+  text?: { text?: string };
+  fields?: { text?: string }[];
+  elements?: { type: string; text?: string | { text?: string } }[];
+}
+
+/** Message subtypes that are still a person talking; other subtypes (edits, joins…) aren't requests. */
+const PERSON_SUBTYPES = new Set(["file_share", "thread_broadcast"]);
 
 /** Catch-up reads threads with activity in this window, at most this many. */
 const CATCH_UP_WINDOW_MS = 24 * 60 * 60_000;
@@ -188,7 +240,10 @@ export class SlackGateway implements Gateway {
   /** `quiet` (for catch-up) posts no notices and logs nothing, since it sees the same messages again. */
   private toMessage(event: SlackEvent, { quiet = false } = {}): InboundMessage | undefined {
     if (event.type !== "app_mention" && event.type !== "message") return;
-    if (event.bot_id || event.subtype || !event.user || !event.text) return;
+    if (event.bot_id || (event.subtype && !PERSON_SUBTYPES.has(event.subtype)) || !event.user) return;
+    const files = filesOf(event);
+    const typed = event.text ?? "";
+    if (!typed && files.length === 0) return;
 
     const mention = `<@${this.botUserId}>`;
     const rootTs = event.thread_ts ?? event.ts;
@@ -199,7 +254,7 @@ export class SlackGateway implements Gateway {
     if (event.type === "message" && !dm) {
       // A mention arrives as both app_mention and message; app_mention handles it.
       // Plain messages only matter as replies in a Slack thread that already has a T3 thread.
-      if (event.text.includes(mention) || !event.thread_ts || !conversation) return;
+      if (typed.includes(mention) || !event.thread_ts || !conversation) return;
     }
     // Slack's retries and catch-up can bring a message that was already handled.
     if (conversation && this.store.hasInbound(conversation.id, event.ts)) return;
@@ -212,7 +267,7 @@ export class SlackGateway implements Gateway {
       if (!quiet) log(this.name, `ignored ${event.user} in ${event.channel}: not on the allowlist`, "warn");
       return notice(`<@${event.user}> isn't allowed to use t3c.`);
     }
-    const text = event.text.replaceAll(mention, "").trim();
+    const text = render({ ...event, text: typed.replaceAll(mention, "") });
     if (!text) return notice("What should I work on?");
 
     return {
@@ -225,18 +280,22 @@ export class SlackGateway implements Gateway {
       title: firstLine(text),
       projects: this.config.projects,
       meta: { channel: event.channel, ts: event.ts, ...(event.thread_ts ? { threadTs: event.thread_ts } : {}) },
+      ...(files.length > 0 && { files }),
     };
   }
 
-  /** The whole Slack thread before this message, with people's names, as context. */
-  async prepare(message: InboundMessage) {
+  /**
+   * The whole Slack thread before this message as context: every message with people's names,
+   * including bot cards, link previews and forwarded messages, and the files shared in it.
+   */
+  async prepare(message: InboundMessage): Promise<Preparation> {
     const { channel, ts, threadTs } = message.meta!;
     if (!threadTs) return {};
     const earlier: SlackEvent[] = [];
     let cursor = "";
     do {
       const page = await this.slack("conversations.replies", { channel, ts: threadTs, limit: "200", ...(cursor ? { cursor } : {}) });
-      earlier.push(...(page.messages as SlackEvent[]).filter((m) => m.ts !== ts && m.text));
+      earlier.push(...(page.messages as SlackEvent[]).filter((m) => m.ts !== ts && render(m)));
       cursor = page.response_metadata?.next_cursor ?? "";
     } while (cursor && earlier.length < MAX_CONTEXT_MESSAGES * 2);
     if (earlier.length === 0) return {};
@@ -246,8 +305,19 @@ export class SlackGateway implements Gateway {
       earlier.length <= MAX_CONTEXT_MESSAGES
         ? earlier
         : [earlier[0], { ts: "", text: `(${earlier.length - MAX_CONTEXT_MESSAGES} messages omitted)` } as SlackEvent, ...earlier.slice(-(MAX_CONTEXT_MESSAGES - 1))];
-    const lines = await Promise.all(kept.map(async (m) => (m.ts ? `${await this.author(m)}: ${await this.withNames(m.text!)}` : m.text!)));
-    return { context: lines.join("\n") };
+    const lines = await Promise.all(kept.map(async (m) => (m.ts ? `${await this.author(m)}: ${await this.withNames(render(m))}` : m.text!)));
+    const files = kept.flatMap(filesOf);
+    return { context: lines.join("\n"), ...(files.length > 0 && { files }) };
+  }
+
+  /** Slack serves private files to the bot token; without files:read it answers with a sign-in page. */
+  async download(file: FileRef): Promise<Buffer> {
+    const res = await fetch(file.url, { headers: { authorization: `Bearer ${this.config.botToken}` }, signal: AbortSignal.timeout(60_000) });
+    if (!res.ok) throw new Error(`Slack answered ${res.status}`);
+    if (res.headers.get("content-type")?.startsWith("text/html") && !file.mimeType.startsWith("text/html")) {
+      throw new Error("Slack sent a sign-in page instead: the app needs the files:read scope (run `t3c add slack` to update it)");
+    }
+    return Buffer.from(await res.arrayBuffer());
   }
 
   private author(m: SlackEvent) {
@@ -303,6 +373,49 @@ export function slackChallenge(body: Buffer): string | undefined {
   } catch {}
 }
 
+/**
+ * Everything a person would see in a message, as text: what was typed, then bot cards, link
+ * previews and forwarded messages, then block content the text leaves out, then the files.
+ */
+export function render(m: SlackEvent): string {
+  const parts = [m.text?.trim() ?? ""];
+  for (const a of m.attachments ?? []) {
+    const title = a.title && a.title_link ? `${a.title} (${a.title_link})` : a.title;
+    const fields = (a.fields ?? []).map((f) => [f.title, f.value].filter(Boolean).join(": "));
+    const card = [a.pretext, a.author_name, title, a.text, ...fields, a.footer].filter(Boolean).join("\n");
+    parts.push(quote(card || a.fallback || ""));
+  }
+  const blocks = (m.blocks ?? []).flatMap(blockText).join("\n");
+  // Rich text blocks repeat the typed text; other blocks (bot layouts) usually add to it.
+  if (blocks && !parts[0].includes(blocks.trim())) parts.push(blocks);
+  for (const f of filesOf(m)) parts.push(`[file: ${f.name} (${f.mimeType})]`);
+  return parts.filter(Boolean).join("\n").trim();
+}
+
+function blockText(block: SlackBlock): string[] {
+  if (block.type === "rich_text") return [];
+  const texts = [block.text?.text, ...(block.fields ?? []).map((f) => f.text)];
+  if (block.type === "context") texts.push(...(block.elements ?? []).map((e) => (typeof e.text === "string" ? e.text : e.text?.text)));
+  return texts.filter((t): t is string => Boolean(t));
+}
+
+function quote(text: string) {
+  return text.trim() ? text.trim().replace(/^/gm, "> ") : "";
+}
+
+/** Files in a message and in messages forwarded into it, minus deleted or hidden ones. */
+function filesOf(m: SlackEvent): FileRef[] {
+  const files = [...(m.files ?? []), ...(m.attachments ?? []).flatMap((a) => a.files ?? [])];
+  return files
+    .filter((f) => (f.url_private_download || f.url_private) && f.mode !== "tombstone" && f.mode !== "hidden_by_limit")
+    .map((f) => ({
+      name: f.name || f.title || "file",
+      mimeType: f.mimetype || "application/octet-stream",
+      size: f.size ?? 0,
+      url: (f.url_private_download || f.url_private)!,
+    }));
+}
+
 /** DM channel ids start with D. */
 function isDm(channel: string) {
   return channel.startsWith("D");
@@ -327,6 +440,7 @@ export function slackManifest(publicUrl: string, name = "t3bot") {
           "im:history",
           "im:read",
           "chat:write",
+          "files:read",
           "reactions:write",
           "users:read",
         ],

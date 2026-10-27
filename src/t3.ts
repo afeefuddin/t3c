@@ -30,6 +30,21 @@ export interface ThreadModel {
   model: string;
 }
 
+/** A file to hand a thread along with a message. */
+export interface Attachment {
+  name: string;
+  mimeType: string;
+  data: Buffer;
+}
+
+/** T3 takes images up to 10 MB and other files up to 50 MB, at most 8 per message. */
+export const ATTACHMENT_LIMITS = { image: 10 * 1024 * 1024, file: 50 * 1024 * 1024, perMessage: 8 };
+const IMAGE_TYPES = new Set(["image/gif", "image/jpeg", "image/png", "image/webp"]);
+
+export function attachmentType(mimeType: string): "image" | "file" {
+  return IMAGE_TYPES.has(mimeType) ? "image" : "file";
+}
+
 export interface LaunchInput {
   projectId: string;
   title: string;
@@ -38,6 +53,7 @@ export interface LaunchInput {
   runtimeMode: RuntimeMode;
   /** Needed when the project has no default model in T3. */
   modelSelection?: { instanceId: string; model: string };
+  attachments?: Attachment[];
 }
 
 /** The slice of T3's orchestration tools the dispatcher needs. */
@@ -46,7 +62,7 @@ export interface T3 {
   /** Newest first. `settled: false` is T3's active list. */
   listThreads(projectId: string, filter: { titleContains?: string; settled?: boolean }): Promise<ThreadSummary[]>;
   launchThread(input: LaunchInput): Promise<{ threadId: string }>;
-  sendToThread(threadId: string, message: string): Promise<void>;
+  sendToThread(threadId: string, message: string, attachments?: Attachment[]): Promise<void>;
   /** Status and the latest messages (the task, its answers and updates), oldest first. */
   recentMessages(threadId: string): Promise<{ status: string; messages: { type: string; text: string | null }[] }>;
   /** Waits for a run that finished after `since` (ISO time) and returns its final answer. */
@@ -86,17 +102,20 @@ const MAX_WAIT_MS = 2 * 60 * 60_000;
 export class T3Client implements T3 {
   private readonly client: ToolCaller;
   private readonly onClose: () => Promise<void>;
+  /** T3's HTTP origin, where attachments are uploaded. */
+  private readonly origin: string;
 
-  constructor(client: ToolCaller, onClose: () => Promise<void> = async () => {}) {
+  constructor(client: ToolCaller, onClose: () => Promise<void> = async () => {}, origin = "http://127.0.0.1:3773") {
     this.client = client;
     this.onClose = onClose;
+    this.origin = origin;
   }
 
   static async connect(auth: T3Auth): Promise<T3Client> {
     const transport = new StreamableHTTPClientTransport(new URL(auth.serverUrl), { fetch: auth.fetch });
     const client = new Client({ name: "t3c", version: "0.1.0" });
     await client.connect(transport);
-    return new T3Client(client, () => transport.close());
+    return new T3Client(client, () => transport.close(), new URL(auth.serverUrl).origin);
   }
 
   async close() {
@@ -123,20 +142,39 @@ export class T3Client implements T3 {
     return threads;
   }
 
-  async launchThread(input: LaunchInput) {
+  async launchThread({ attachments, ...input }: LaunchInput) {
     const result = await this.call<{ threadId?: string; thread?: { threadId?: string; id?: string } }>(
       "t3_thread_launch",
-      { ...input },
+      { ...input, ...(attachments?.length && { attachments: await this.upload(attachments) }) },
     );
     const threadId = result.threadId ?? result.thread?.threadId ?? result.thread?.id;
     if (!threadId) throw new Error(`t3_thread_launch returned no threadId: ${JSON.stringify(result)}`);
     return { threadId };
   }
 
-  async sendToThread(threadId: string, message: string) {
+  async sendToThread(threadId: string, message: string, attachments: Attachment[] = []) {
     // A settled thread is back in the active list once it has work again.
     await this.call("t3_thread_organize", { threadId, action: "unsettle" }).catch(() => {});
-    await this.call("t3_thread_send", { threadId, message, mode: "auto" });
+    if (attachments.length === 0) await this.call("t3_thread_send", { threadId, message, mode: "auto" });
+    else await this.call("t3_thread_send_attachments", { threadId, message, attachments: await this.upload(attachments) });
+  }
+
+  /** Uploads each file to a signed URL T3 hands out, for a launch or message to reference. */
+  private async upload(attachments: Attachment[]) {
+    return Promise.all(
+      attachments.slice(0, ATTACHMENT_LIMITS.perMessage).map(async ({ name, mimeType, data }) => {
+        const upload = { type: attachmentType(mimeType), name, mimeType, sizeBytes: data.length };
+        const { attachmentId, relativeUrl } = await this.call<{ attachmentId: string; relativeUrl: string }>("t3_attachment_prepare_upload", { upload });
+        const res = await fetch(new URL(relativeUrl, this.origin), {
+          method: "POST",
+          headers: { "content-type": mimeType },
+          body: new Uint8Array(data),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!res.ok) throw new Error(`Uploading ${name} to T3 failed: ${res.status} ${await res.text()}`);
+        return { id: attachmentId, type: upload.type, name, mimeType, sizeBytes: data.length };
+      }),
+    );
   }
 
   async progress(threadId: string) {

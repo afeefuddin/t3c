@@ -51,7 +51,9 @@ is needed. T3's tokens last 30 days, and t3c logs in again the same way before i
 
 - **Slack:** `@t3bot fix the login redirect` in any channel the bot is invited to starts a thread,
   and so does any message in a DM with the bot. Replies in the Slack thread are sent to the same
-  T3 thread. If you mention the bot inside an existing Slack
+  T3 thread. Everything in the Slack thread goes along: text, bot cards (CI, alerts), link
+  previews, forwarded messages, and files: screenshots, logs and PDFs are attached to the T3 thread
+  (up to 8 per message; images up to 10 MB, other files up to 50 MB). If you mention the bot inside an existing Slack
   thread, the earlier messages are included as context.
 - **GitHub:** `/t3c fix this` on an issue starts a thread on branch `t3c/issue-<n>`. On a pull
   request, the agent works on the PR's branch. Later `/t3c` comments are follow-ups.

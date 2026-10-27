@@ -19,6 +19,8 @@ self-contained task in plain words, so it can start without asking anything.
 - **Done means**: what to deliver. A fix with a PR, an investigation with findings, or just an
   answer ("Report whether #4250 is merged and deployed, and if not, what it's waiting on."). The
   answer comes back to you, so ask for what you'll need to tell the person.
+- **Files** shared in the conversation (`[file: …]`: screenshots, logs, PDFs) are attached to the
+  thread for you. Refer to them by name ("see shot.png") rather than describing them.
 - **Assumptions** you made where the request was ambiguous, so the agent can check them.
 
 Leave out everything the coding agent can't use: chat user IDs and mentions (`<@U123>`, `@bob`),

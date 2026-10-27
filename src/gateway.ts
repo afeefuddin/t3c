@@ -28,6 +28,17 @@ export interface InboundMessage {
   url?: string;
   /** Gateway-specific details needed later, e.g. the Slack message ts to react to. */
   meta?: Record<string, string>;
+  /** Files attached to the request (screenshots, logs), fetched with the gateway's `download`. */
+  files?: FileRef[];
+}
+
+/** A file in the conversation, not yet downloaded. */
+export interface FileRef {
+  name: string;
+  mimeType: string;
+  /** Bytes, as the platform reports it. */
+  size: number;
+  url: string;
 }
 
 export interface Worktree {
@@ -43,6 +54,8 @@ export interface Preparation {
   /** Instructions from the gateway itself (trusted), e.g. which branch to push to. */
   instructions?: string;
   worktree?: Worktree;
+  /** Files in the earlier conversation, oldest first. */
+  files?: FileRef[];
 }
 
 export interface Received {
@@ -62,6 +75,8 @@ export interface Gateway {
   receive(req: GatewayRequest): Promise<Received> | Received;
   /** Gathers context for the first message of a conversation. */
   prepare?(message: InboundMessage): Promise<Preparation>;
+  /** A file's bytes, from `InboundMessage.files` or `Preparation.files`. */
+  download?(file: FileRef): Promise<Buffer>;
   /** Signals that work started, e.g. a 👀 reaction. Best effort. */
   acknowledge?(message: InboundMessage): Promise<void>;
   /** Posts text (Markdown) back into the conversation. */

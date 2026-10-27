@@ -83,3 +83,41 @@ test("recentMessages reads the tail of the thread's messages", async () => {
   assert.equal(calls[1].view, "messages");
   assert.equal(calls[1].afterPosition, 50);
 });
+
+test("attachments are uploaded to T3's signed URLs, then referenced by the launch", async () => {
+  const { createServer } = await import("node:http");
+  const uploads: { url: string; type: string; body: string }[] = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c)).on("end", () => {
+      uploads.push({ url: req.url!, type: req.headers["content-type"]!, body });
+      res.writeHead(204).end();
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const calls: { name: string; args: any }[] = [];
+  const callTool = async ({ name, arguments: args }: { name: string; arguments?: any }) => {
+    calls.push({ name, args });
+    const body = name === "t3_attachment_prepare_upload" ? { attachmentId: `pending-${args.upload.name}`, relativeUrl: `/up/${args.upload.name}` } : { threadId: "t1" };
+    return { content: [{ type: "text", text: JSON.stringify(body) }] };
+  };
+  try {
+    const client = new T3Client({ callTool } as never, async () => {}, origin);
+    const attachments = [
+      { name: "shot.png", mimeType: "image/png", data: Buffer.from("png") },
+      { name: "build.log", mimeType: "text/plain", data: Buffer.from("log!") },
+    ];
+    await client.launchThread({ projectId: "p1", title: "t", message: "m", workspaceStrategy: { type: "root" }, runtimeMode: "auto", attachments });
+    assert.deepEqual(uploads, [
+      { url: "/up/shot.png", type: "image/png", body: "png" },
+      { url: "/up/build.log", type: "text/plain", body: "log!" },
+    ]);
+    assert.deepEqual(calls.at(-1)?.args.attachments, [
+      { id: "pending-shot.png", type: "image", name: "shot.png", mimeType: "image/png", sizeBytes: 3 },
+      { id: "pending-build.log", type: "file", name: "build.log", mimeType: "text/plain", sizeBytes: 4 },
+    ]);
+  } finally {
+    server.close();
+  }
+});

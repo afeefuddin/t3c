@@ -273,3 +273,25 @@ test("messages sent in a burst, or while a run is busy, get one run and one repl
   assert.deepEqual(gateway.replies.map((r) => r.text), ["reply 1", "reply 2"]);
   assert.deepEqual(gateway.acks, ["a", "b", "c", "d"]); // each message still gets its 👀
 });
+
+test("files shared in the conversation go to the thread, and later ones with the follow-up that brought them", async () => {
+  const { t3, gateway, worker } = setup();
+  const file = (name: string, mimeType = "image/png") => ({ name, mimeType, size: 3, url: `https://files/${name}` });
+  gateway.preparation = { context: "bob: see the log [file: build.log (text/plain)]", files: [file("build.log", "text/plain")] };
+  gateway.files.set("https://files/build.log", "log").set("https://files/shot.png", "png").set("https://files/after.png", "png");
+  worker.enqueue(message({ files: [file("shot.png"), file("missing.png")] }));
+  await worker.idle();
+
+  // What couldn't be fetched is left out; the rest goes along, oldest first.
+  assert.deepEqual(
+    t3.launches[0].attachments?.map((a) => [a.name, a.mimeType, a.data.toString()]),
+    [
+      ["build.log", "text/plain", "log"],
+      ["shot.png", "image/png", "png"],
+    ],
+  );
+
+  worker.enqueue(message({ eventKey: "e2", text: "this one too", files: [file("after.png")] }));
+  await worker.idle();
+  assert.deepEqual(t3.sends.at(-1)?.attachments?.map((a) => a.name), ["after.png"]);
+});
