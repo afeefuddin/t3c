@@ -32,11 +32,6 @@ export async function start(entry: string) {
   }
 
   say.step("Starting t3c");
-  if (needsFunnel(config)) {
-    const hooks = await enableFunnel(config.port);
-    say.ok(`Tailscale Funnel: ${hooks} (only /hooks is public)`);
-  }
-
   mkdirSync(home, { recursive: true, mode: 0o700 });
   const logFd = openSync(paths.log, "a", 0o600);
   const child = spawn(process.execPath, [...process.execArgv, entry, "serve"], {
@@ -48,15 +43,20 @@ export async function start(entry: string) {
   child.unref();
 
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-  if (await waitForHealth(config.port, exited)) {
-    say.ok(`Running in the background (pid ${child.pid}), listening on 127.0.0.1:${config.port}.`);
-    say.hint(`Logs: t3c logs -f   Stop: t3c stop`);
-  } else {
+  if (!(await waitForHealth(config.port, child.pid!, exited))) {
     rmSync(paths.pid, { force: true });
     say.warn("t3c stopped right after starting. Last log lines:");
     console.log(tail(15));
     process.exitCode = 1;
+    return;
   }
+  say.ok(`Running in the background (pid ${child.pid}), listening on 127.0.0.1:${config.port}.`);
+  // Only once t3c itself answers on the port is it published, so Funnel never exposes something else.
+  if (needsFunnel(config)) {
+    const hooks = await enableFunnel(config.port);
+    say.ok(`Tailscale Funnel: ${hooks} (only /hooks is public)`);
+  }
+  say.hint(`Logs: t3c logs -f   Stop: t3c stop`);
 }
 
 export async function stop({ keepFunnel = false } = {}) {
@@ -115,12 +115,14 @@ export function describeGateways(config: Config): string[] {
   return lines.length > 0 ? lines : ["none yet — `t3c add slack`, `t3c add github <owner/repo>`, `t3c add http`"];
 }
 
-async function waitForHealth(port: number, exited: Promise<void>) {
+/** True once the process we started (not something else on the port) answers its health check. */
+async function waitForHealth(port: number, pid: number, exited: Promise<void>) {
   let dead = false;
   void exited.then(() => (dead = true));
   for (let i = 0; i < 100 && !dead; i++) {
     try {
-      if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return true;
+      const response = await fetch(`http://127.0.0.1:${port}/health`);
+      if (response.ok && ((await response.json()) as { pid?: number }).pid === pid) return true;
     } catch {}
     await sleep(150);
   }

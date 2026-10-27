@@ -11,7 +11,7 @@ import { loadSkills } from "./skills.ts";
 
 export interface CodexOptions {
   toolServer: AgentToolServer;
-  /** Where Codex reaches the tool server, e.g. http://127.0.0.1:8787/agent/mcp. */
+  /** Where Codex reaches the tool server, e.g. http://127.0.0.1:4773/agent/mcp. */
   toolsUrl: string;
   skillsDir: string;
   /** Empty working directory for runs; Codex can't change anything there anyway (read-only). */

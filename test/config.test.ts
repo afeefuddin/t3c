@@ -9,7 +9,7 @@ const { loadConfig, needsFunnel, paths, saveConfig } = await import("../src/conf
 const { describeGateways } = await import("../src/daemon.ts");
 
 test("config starts with safe defaults and is saved readable only by the owner", () => {
-  assert.deepEqual(loadConfig(), { port: 8787, runtimeMode: "auto-accept-edits" });
+  assert.deepEqual(loadConfig(), { port: 4773, runtimeMode: "auto-accept-edits" });
   saveConfig({ ...loadConfig(), http: { secret: "s" } });
   assert.equal(statSync(paths.config).mode & 0o777, 0o600);
   assert.equal(statSync(join(paths.config, "..")).mode & 0o777, 0o700);

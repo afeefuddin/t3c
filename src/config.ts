@@ -38,7 +38,7 @@ export interface Config {
   };
 }
 
-export const DEFAULT_CONFIG: Config = { port: 8787, runtimeMode: "auto-accept-edits" };
+export const DEFAULT_CONFIG: Config = { port: 4773, runtimeMode: "auto-accept-edits" };
 
 /** State directory: ~/.t3c, or $T3C_HOME. */
 export const home = process.env.T3C_HOME ?? join(homedir(), ".t3c");

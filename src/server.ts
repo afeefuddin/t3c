@@ -54,7 +54,7 @@ export function createApp({ gateways, worker, store, secret, agentTools }: Serve
 
       if (url.pathname === "/agent/mcp" && agentTools) return await agentTools.handle(req, res);
 
-      if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
+      if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true, pid: process.pid });
       send(res, 404, { error: "Not found." });
     } catch (error) {
       if (error instanceof GatewayError) {
