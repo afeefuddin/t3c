@@ -295,3 +295,35 @@ test("files shared in the conversation go to the thread, and later ones with the
   await worker.idle();
   assert.deepEqual(t3.sends.at(-1)?.attachments?.map((a) => a.name), ["after.png"]);
 });
+
+test("work that's called off stays stopped: its stop doesn't wake the brain to carry on", async () => {
+  const events: string[] = [];
+  const brain: Brain = {
+    name: "test",
+    async handle(event, tools) {
+      events.push(event.type);
+      if (event.type !== "message") return "ignored";
+      if (event.messages[0].text === "nvm") {
+        await tools.interruptThread({ label: "main", reason: "Called off" });
+        await tools.reply({ text: "Stopped 👍" });
+        return "stopped";
+      }
+      await tools.startThread({ project: "Demo", title: "Fix login", prompt: "fix it" });
+      return "started";
+    },
+  };
+  const { t3, store, gateway, worker } = setup({ brain });
+  let release!: () => void;
+  t3.gate = new Promise((r) => (release = r));
+  worker.enqueue(message());
+  await new Promise((r) => setTimeout(r, 20));
+  worker.enqueue(message({ eventKey: "e2", text: "nvm" }));
+  await new Promise((r) => setTimeout(r, 20));
+  release(); // the interrupted turn ends
+  await worker.idle();
+
+  assert.deepEqual(t3.interrupts, [{ threadId: "t1", reason: "Called off" }]);
+  assert.deepEqual(events, ["message", "message"]);
+  assert.deepEqual(gateway.replies.map((r) => r.text), ["Stopped 👍"]);
+  assert.deepEqual(store.awaitingThreads(), []);
+});
