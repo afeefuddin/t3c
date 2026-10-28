@@ -22,11 +22,14 @@ npm install -g github:afeefuddin/t3c   # private repo: needs your GitHub access
 ## Set up
 
 ```sh
-t3c login                     # connect to T3 Code and pick the model threads use
-t3c add slack                 # guided: creates the Slack app, picks who may use it and its projects
-t3c add github owner/repo     # adds the webhook (uses your `gh` login)
-t3c start                     # runs in the background
+t3c setup                     # guided: connects T3 Code, creates the Slack app, and starts t3c
+t3c add github owner/repo     # optional: adds the webhook (uses your `gh` login)
 ```
+
+`t3c setup` opens Slack with the app already filled in, asks for the two values Slack shows you
+(it opens the right pages), who may use the bot (by @handle or name) and which projects it may work
+on, and offers to let Codex decide what to do with messages. Run `t3c add slack` later to change
+those settings, or to update an older app with permissions newer features need.
 
 Each `add` step can be run again later: `add slack` updates the app and its settings, `add github`
 adds another repository.

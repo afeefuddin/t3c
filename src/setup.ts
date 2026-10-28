@@ -2,52 +2,44 @@ import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { loadConfig, paths, saveConfig } from "./config.ts";
 import { connectRepo, githubApi } from "./gateways/github.ts";
-import { slackApi, slackManifest } from "./gateways/slack.ts";
+import { findSlackUsers, SLACK_BOT_SCOPES, slackApi, slackAppInfo, slackManifest, slackNewAppUrl } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
-import { t3Auth } from "./auth.ts";
+import { isLoggedIn, t3Auth } from "./auth.ts";
 import { T3Client } from "./t3.ts";
-import { runningPid } from "./daemon.ts";
+import { runningPid, start, stop } from "./daemon.ts";
 import { slackChallengeServer } from "./server.ts";
 import { disableFunnel, enableFunnel, funnelBaseUrl } from "./tailscale.ts";
 import { ask, choose, confirm, say } from "./ui.ts";
 
 /**
- * `t3c add slack`: first run connects the workspace; later runs update the app's manifest and who
- * may use it. The bot works in every channel it's invited to and in DMs, in the chosen projects.
+ * `t3c add slack`: first run creates and connects the app; later runs bring the app up to date and
+ * change who may use it. The bot works in every channel it's invited to and in DMs.
  */
 export async function addSlack() {
   const config = loadConfig();
-  let slack = config.slack;
+  const previous = config.slack;
+  let slack = previous;
 
-  if (slack && !(await confirm("Slack is already connected. Reconnect the app (new tokens)?", false))) {
-    // Apps created from an older manifest lack newer features (DMs): bring it up to date.
-    const manifest = JSON.stringify(slackManifest(await publicUrl()), null, 2);
-    if (copy(manifest)) say.ok("Copied the current app manifest to your clipboard.");
-    else console.log(manifest);
-    say.info("To update the app (e.g. so people can DM it): api.slack.com/apps → your app → App Manifest →");
-    say.info("paste it (JSON tab) → Save, then reinstall the app if Slack asks.");
+  if (slack && !(await confirm("Slack is already connected. Connect a different Slack app instead?", false))) {
+    await updateSlackApp(slack.botToken);
   } else {
-    const base = await publicUrl();
+    const manifest = slackManifest(await publicUrl());
     say.step("1. Create the Slack app");
-    const manifest = JSON.stringify(slackManifest(base), null, 2);
-    if (copy(manifest)) say.ok("Copied the app manifest to your clipboard.");
-    else console.log(manifest);
-    say.info("In the browser: Create New App → From a manifest → pick your workspace → paste the");
-    say.info("manifest (JSON tab) → Create → Install to Workspace.");
-    const stopAnswering = await answerSlackUrlCheck(loadConfig().port);
-    openUrl("https://api.slack.com/apps?new_app=1");
+    say.info("Opening Slack with the app's settings filled in. Pick your workspace → Next → Create,");
+    say.info("then Install to Workspace → Allow.");
+    const stopAnswering = await answerSlackUrlCheck(config.port);
+    openUrl(slackNewAppUrl(manifest));
     try {
-      await ask("Press Enter when the app is installed", { default: "done" });
+      await ask("Press Enter once it's installed", { default: "done" });
     } finally {
       await stopAnswering();
     }
 
-    say.step("2. Paste its credentials");
-    say.hint("OAuth & Permissions → Bot User OAuth Token");
+    say.step("2. Connect it");
+    say.hint("On the app's page: OAuth & Permissions → Bot User OAuth Token → Copy");
     let team = "";
     const botToken = await ask("Bot token (xoxb-…)", {
       hidden: true,
-      default: slack?.botToken,
       validate: async (token) => {
         if (!token.startsWith("xoxb-")) return "Bot tokens start with xoxb-.";
         try {
@@ -59,41 +51,57 @@ export async function addSlack() {
       },
     });
     say.ok(`Connected to ${team}.`);
-    say.hint("Basic Information → App Credentials → Signing Secret");
+    const { appId } = await slackAppInfo(botToken).catch(() => ({ appId: undefined }));
+    if (appId) openUrl(`https://api.slack.com/apps/${appId}/general`);
+    say.hint(`${appId ? "Opened the app's Basic Information page: " : "Basic Information → "}App Credentials → Signing Secret → Show → copy`);
     const signingSecret = await ask("Signing secret", {
       hidden: true,
-      default: slack?.signingSecret,
       validate: (s) => (/^[0-9a-f]{32}$/.test(s) ? undefined : "That doesn't look like a signing secret (32 hex characters)."),
     });
-    slack = { botToken, signingSecret, projects: slack?.projects ?? ["*"], allowedUsers: slack?.allowedUsers ?? [] };
+    slack = { botToken, signingSecret, projects: previous?.projects ?? ["*"], allowedUsers: previous?.allowedUsers ?? [] };
     saveConfig({ ...config, slack });
   }
 
   const api = slackApi(slack.botToken);
   say.step("Who may use the bot?");
-  say.hint("Only these people can start work on this machine. Find your id: Slack → your profile → ⋮ → Copy member ID.");
-  const users = await ask("Slack member ids, comma-separated", {
-    default: slack.allowedUsers.join(",") || undefined,
+  say.hint("Only they can start work on this machine. Their Slack @handles or names, e.g. @afeef, Priya.");
+  let allowed: { id: string; name: string }[] = [];
+  await ask("People, comma-separated", {
+    default: slack.allowedUsers.join(", ") || undefined,
     validate: async (value) => {
-      for (const id of split(value)) {
-        try {
-          await api("users.info", { user: id });
-        } catch {
-          return `${id} isn't a member of this workspace.`;
-        }
-      }
+      const found = await findSlackUsers(api, split(value));
+      if ("error" in found) return found.error;
+      allowed = found.users;
     },
   });
-  slack.allowedUsers = split(users);
+  slack.allowedUsers = allowed.map((u) => u.id);
+  say.ok(`Allowed: ${allowed.map((u) => `@${u.name}`).join(", ")}`);
 
-  slack.projects = await chooseProjects("Which T3 projects may the bot work on?");
+  slack.projects = await chooseProjects("Which T3 projects may the bot work on?", slack.projects);
   saveConfig({ ...loadConfig(), slack });
-
   say.ok(`Projects: ${slack.projects.join(", ")}`);
-  if (slack.projects.length > 1 || slack.projects[0] === "*") {
-    say.hint(loadConfig().agent ? "Codex picks the project per request." : "Messages pick one with `in:<project>`, or turn on `t3c agent codex` to let Codex pick.");
+  if (!loadConfig().agent && (slack.projects.length > 1 || slack.projects[0] === "*")) {
+    say.hint("Messages pick one with `in:<project>`, or turn on `t3c agent codex` to let Codex pick.");
   }
-  finish("Invite the bot to any channel (/invite @<your bot>) and mention it there, or DM it.");
+  await finish("Invite the bot to a channel (/invite @<your bot>) and mention it there, or DM it.");
+}
+
+/** Checks a connected app has every scope t3c needs, and walks through updating it if not. */
+async function updateSlackApp(botToken: string) {
+  const { appId, scopes } = await slackAppInfo(botToken);
+  const missing = () => SLACK_BOT_SCOPES.filter((s) => !scopes.includes(s));
+  if (missing().length === 0) return say.ok("The Slack app is up to date.");
+  say.step("Update the Slack app");
+  say.warn(`It's missing ${missing().join(", ")}, which DMs and files need.`);
+  const manifest = JSON.stringify(slackManifest(await publicUrl()), null, 2);
+  if (copy(manifest)) say.ok("Copied the current app manifest to your clipboard.");
+  else console.log(manifest);
+  say.info(`${appId ? "Opening" : "Open"} the app's manifest: replace it with this one (JSON tab) → Save → Reinstall to Workspace → Allow.`);
+  openUrl(appId ? `https://api.slack.com/apps/${appId}/app-manifest` : "https://api.slack.com/apps");
+  await ask("Press Enter once it's reinstalled", { default: "done" });
+  scopes.splice(0, scopes.length, ...(await slackAppInfo(botToken)).scopes);
+  if (missing().length === 0) say.ok("The Slack app is up to date.");
+  else say.warn(`Still missing ${missing().join(", ")}. Run \`t3c add slack\` again after reinstalling the app.`);
 }
 
 /** `t3c add github owner/repo`: creates the webhook and maps the repo to a project. */
@@ -123,11 +131,11 @@ export async function addGithub(repo: string) {
   const { created } = await connectRepo(github, info.full_name, hookUrl, githubConfig.webhookSecret);
   saveConfig({ ...loadConfig(), github: githubConfig });
   say.ok(`${created ? "Added" : "Updated"} the webhook → ${hookUrl}`);
-  finish(`Comment \`/t3c <what to do>\` on any issue or pull request in ${info.full_name}.`);
+  await finish(`Comment \`/t3c <what to do>\` on any issue or pull request in ${info.full_name}.`);
 }
 
 /** `t3c add http`: a bearer-protected endpoint for scripts and cron. */
-export function addHttp() {
+export async function addHttp() {
   const config = loadConfig();
   const secret = config.http?.secret ?? randomBytes(32).toString("base64url");
   saveConfig({ ...config, http: { secret } });
@@ -136,7 +144,7 @@ export function addHttp() {
   say.info(`curl -X POST http://127.0.0.1:${config.port}/hooks/http \\`);
   say.info(`  -H "Authorization: Bearer ${secret}" -H 'content-type: application/json' \\`);
   say.info(`  -d '{"conversationId":"job-1","project":"<project>","title":"Fix login","prompt":"Fix the login bug"}'`);
-  finish("Calls with the same conversationId continue the same T3 thread.");
+  await finish("Calls with the same conversationId continue the same T3 thread.");
 }
 
 export async function remove(kind: string, target?: string) {
@@ -159,7 +167,7 @@ export async function remove(kind: string, target?: string) {
     throw new Error("Usage: t3c remove slack | github <owner/repo> | http");
   }
   saveConfig(config);
-  finish(`Removed ${[kind, target].filter(Boolean).join(" ")}.`);
+  await finish(`Removed ${[kind, target].filter(Boolean).join(" ")}.`);
 }
 
 async function removeWebhook(repo: string) {
@@ -172,21 +180,23 @@ async function removeWebhook(repo: string) {
   }
 }
 
-/** One or more projects (numbers or names, comma-separated), or * for any. */
-async function chooseProjects(label: string): Promise<string[]> {
+/** One or more projects (numbers or names, comma-separated), or * for any. Keeps `current` on Enter. */
+async function chooseProjects(label: string, current: string[] = []): Promise<string[]> {
   const projects = await listProjectsQuietly();
   if (projects.length > 0) {
     say.info(label);
     projects.forEach((p, i) => say.info(`  ${i + 1}. ${p.title}`));
     say.info("  *. any project");
   }
-  const answer = await ask(projects.length > 0 ? "Numbers, comma-separated (or *)" : `${label} Project names, comma-separated (or *)`, {
+  const pick = (x: string) => projects[Number(x) - 1] ?? projects.find((p) => p.title.toLowerCase() === x.toLowerCase());
+  const answer = await ask(projects.length > 0 ? "Numbers or names, comma-separated (or *)" : `${label} Project names, comma-separated (or *)`, {
+    default: current.join(", ") || undefined,
     validate: (v) =>
-      split(v).every((x) => x === "*" || !projects.length || projects[Number(x) - 1]) ? undefined : `Pick from 1–${projects.length} or *.`,
+      split(v).every((x) => x === "*" || !projects.length || pick(x)) ? undefined : `Pick from 1–${projects.length}, a project's name, or *.`,
   });
   const picks = split(answer);
   if (picks.includes("*")) return ["*"];
-  return picks.map((x) => (projects.length ? projects[Number(x) - 1].title : x));
+  return picks.map((x) => (projects.length ? pick(x)!.title : x));
 }
 
 /** Lists T3 projects when t3c is logged in; otherwise asks for a name. */
@@ -264,10 +274,24 @@ export function githubToken() {
   }
 }
 
-function finish(text: string) {
+async function finish(text: string) {
   say.step("Done.");
   say.info(text);
-  say.hint("Changes apply after `t3c restart` (or `t3c start` if it isn't running).");
+  await applyChanges();
+}
+
+/** Restarts t3c (or starts it, once it has something to run) so new settings take effect. */
+export async function applyChanges() {
+  const entry = process.argv[1];
+  const config = loadConfig();
+  if (runningPid()) {
+    if (!(await confirm("Restart t3c now so this takes effect?"))) return say.hint("It applies after `t3c restart`.");
+    await stop({ keepFunnel: true });
+    await start(entry);
+  } else if (isLoggedIn(paths.auth) && (config.slack || config.github || config.http)) {
+    if (!(await confirm("Start t3c now?"))) return say.hint("Start it with `t3c start`.");
+    await start(entry);
+  }
 }
 
 function split(value: string) {

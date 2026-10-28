@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
-import { render, type SlackEvent, SlackGateway, slackChallenge, slackManifest, toSlackMarkdown } from "../src/gateways/slack.ts";
+import { findSlackUsers, render, type SlackEvent, SlackGateway, slackChallenge, slackManifest, slackNewAppUrl, toSlackMarkdown } from "../src/gateways/slack.ts";
 import { Store } from "../src/store.ts";
 
 const BOT = "UBOT";
@@ -338,4 +338,35 @@ test("catch-up recovers a mention under someone else's message, in a thread t3c 
   assert.deepEqual(missed.map((m) => [m.conversationId, m.text]), [[`C1:${root}`, "what happened to it?"]]);
   for (const m of missed) store.enqueue(m);
   assert.deepEqual(await gateway.catchUp(), []);
+});
+
+test("setup opens Slack's create-app flow with the manifest filled in", () => {
+  const manifest = slackManifest("https://laptop.tail1.ts.net:10000");
+  const url = new URL(slackNewAppUrl(manifest));
+  assert.equal(url.searchParams.get("new_app"), "1");
+  assert.deepEqual(JSON.parse(url.searchParams.get("manifest_json")!), manifest);
+});
+
+test("people are found by @handle, name or id, and ambiguous or unknown names are explained", async () => {
+  const members = [
+    { id: "U01AFEEF", name: "afeef", profile: { display_name: "afeef", real_name: "Afeef Uddin" } },
+    { id: "U02PRIYA", name: "priya.s", profile: { display_name: "PS", real_name: "Priya Sharma" } },
+    { id: "U03PRIYK", name: "priya.k", profile: { display_name: "PK", real_name: "Priya Kumar" } },
+    { id: "U0BOTBOT", name: "deploybot", is_bot: true, profile: { display_name: "afeef" } },
+  ];
+  const slack = async (method: string, args: Record<string, string> = {}) => {
+    if (method === "users.list") return { members };
+    if (method === "users.info") return members.find((m) => m.id === args.user) ? { user: members.find((m) => m.id === args.user) } : Promise.reject(new Error("user_not_found"));
+    return {};
+  };
+  assert.deepEqual(await findSlackUsers(slack, ["@afeef", "Priya Sharma", "U03PRIYK"]), {
+    users: [
+      { id: "U01AFEEF", name: "afeef" },
+      { id: "U02PRIYA", name: "PS" },
+      { id: "U03PRIYK", name: "PK" },
+    ],
+  });
+  assert.match((await findSlackUsers(slack, ["priya"]) as { error: string }).error, /could be @PS \(Priya Sharma\), @PK \(Priya Kumar\)/);
+  assert.match((await findSlackUsers(slack, ["bob"]) as { error: string }).error, /Nobody in this workspace is called "bob"/);
+  assert.match((await findSlackUsers(slack, ["U9ZZZZZZ"]) as { error: string }).error, /isn't a member/);
 });
