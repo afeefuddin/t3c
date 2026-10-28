@@ -52,8 +52,8 @@ export async function addSlack() {
     });
     say.ok(`Connected to ${team}.`);
     const { appId } = await slackAppInfo(botToken).catch(() => ({ appId: undefined }));
-    if (appId) openUrl(`https://api.slack.com/apps/${appId}/general`);
-    say.hint(`${appId ? "Opened the app's Basic Information page: " : "Basic Information → "}App Credentials → Signing Secret → Show → copy`);
+    if (appId) openUrl(`https://api.slack.com/apps/${appId}`);
+    say.hint(`${appId ? "Opened the app's settings: " : "On the app's page: "}Basic Information → App Credentials → Signing Secret → Show → copy`);
     const signingSecret = await ask("Signing secret", {
       hidden: true,
       validate: (s) => (/^[0-9a-f]{32}$/.test(s) ? undefined : "That doesn't look like a signing secret (32 hex characters)."),
@@ -96,8 +96,8 @@ async function updateSlackApp(botToken: string) {
   const manifest = JSON.stringify(slackManifest(await publicUrl()), null, 2);
   if (copy(manifest)) say.ok("Copied the current app manifest to your clipboard.");
   else console.log(manifest);
-  say.info(`${appId ? "Opening" : "Open"} the app's manifest: replace it with this one (JSON tab) → Save → Reinstall to Workspace → Allow.`);
-  openUrl(appId ? `https://api.slack.com/apps/${appId}/app-manifest` : "https://api.slack.com/apps");
+  say.info(`${appId ? "Opening the app's settings" : "Open your app at api.slack.com/apps"}: App Manifest → replace it with this one (JSON tab) → Save → Reinstall to Workspace → Allow.`);
+  openUrl(appId ? `https://api.slack.com/apps/${appId}` : "https://api.slack.com/apps");
   await ask("Press Enter once it's reinstalled", { default: "done" });
   scopes.splice(0, scopes.length, ...(await slackAppInfo(botToken)).scopes);
   if (missing().length === 0) say.ok("The Slack app is up to date.");
