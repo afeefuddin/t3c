@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stands in for `codex exec`: reads the t3c tool URL from -c flags and the token from the env var
 // Codex would use, then calls tools as a scripted agent. FAKE_CODEX_MODE picks the script.
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
@@ -12,6 +12,13 @@ const tokenVar = JSON.parse(config.find((c) => c.startsWith("mcp_servers.t3c.bea
 const outFile = args[args.indexOf("-o") + 1];
 const prompt = args.at(-1);
 const mode = process.env.FAKE_CODEX_MODE ?? "route";
+
+// Records the images it was given (between --image and --) and how the prompt names them.
+if (process.env.FAKE_CODEX_SEEN && !prompt.includes("<thread-answer>")) {
+  const images = args.includes("--image") ? args.slice(args.indexOf("--image") + 1, args.indexOf("--")) : [];
+  const seen = { images: images.map((f) => readFileSync(f, "utf8")), prompt: /# Images\n.*/.exec(prompt)?.[0] };
+  writeFileSync(process.env.FAKE_CODEX_SEEN, JSON.stringify(seen));
+}
 
 if (mode === "crash") {
   console.error("model overloaded");

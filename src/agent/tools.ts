@@ -38,6 +38,8 @@ export class ConversationTools {
   private readonly listed = new Map<string, { projectId: string; title: string }>();
   /** Threads this run already handed the request's files. */
   private readonly filesSent = new Set<string>();
+  /** Downloads by url, so the agent's images and a thread's attachments are fetched once. */
+  private readonly downloads = new Map<string, Promise<Attachment | undefined>>();
 
   constructor(ctx: ToolContext) {
     this.ctx = ctx;
@@ -88,6 +90,16 @@ export class ConversationTools {
   /** The earlier platform conversation, if any, without recording a tool call: for the agent's prompt. */
   async source(): Promise<string | undefined> {
     return (await this.prepare()).context;
+  }
+
+  /**
+   * The images in the conversation (the request's and the earlier ones), newest kept, so the
+   * agent can look at the screenshots people share. Without recording a tool call.
+   */
+  async images(): Promise<Attachment[]> {
+    const files = [...((await this.prepare()).files ?? []), ...(this.ctx.requestFiles ?? [])];
+    const images = files.filter((f) => attachmentType(f.mimeType) === "image");
+    return this.download(images.slice(-ATTACHMENT_LIMITS.perMessage));
   }
 
   /** The source conversation as the platform has it now (Slack thread, GitHub issue and comments). */
@@ -301,17 +313,22 @@ export class ConversationTools {
     const { gateway, conversation } = this.ctx;
     if (!gateway.download || files.length === 0) return [];
     const unique = [...new Map(files.map((f) => [f.url, f])).values()];
+    const fetch = async (file: FileRef): Promise<Attachment | undefined> => {
+      if (file.size > ATTACHMENT_LIMITS[attachmentType(file.mimeType)]) {
+        log(conversation.source, `skipped ${file.name}: too big to attach (${file.size} bytes)`, "warn");
+        return;
+      }
+      try {
+        return { name: file.name, mimeType: file.mimeType, data: await gateway.download!(file) };
+      } catch (error) {
+        log(conversation.source, `couldn't fetch ${file.name}: ${errorMessage(error)}`, "warn");
+      }
+    };
     const fetched = await Promise.all(
-      unique.map(async (file) => {
-        if (file.size > ATTACHMENT_LIMITS[attachmentType(file.mimeType)]) {
-          log(conversation.source, `skipped ${file.name}: too big to attach (${file.size} bytes)`, "warn");
-          return;
-        }
-        try {
-          return { name: file.name, mimeType: file.mimeType, data: await gateway.download!(file) };
-        } catch (error) {
-          log(conversation.source, `couldn't fetch ${file.name}: ${errorMessage(error)}`, "warn");
-        }
+      unique.map((file) => {
+        let pending = this.downloads.get(file.url);
+        if (!pending) this.downloads.set(file.url, (pending = fetch(file)));
+        return pending;
       }),
     );
     return fetched.filter((f) => f !== undefined);
