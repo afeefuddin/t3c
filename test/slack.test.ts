@@ -323,3 +323,19 @@ test("prepare includes everything in the earlier thread, files too", async () =>
   assert.equal(prepared.context, "a bot: > Deploy failed\n@UBOB: here\n[file: shot.png (image/png)]");
   assert.deepEqual(prepared.files?.map((f) => f.name), ["shot.png"]);
 });
+
+test("catch-up recovers a mention under someone else's message, in a thread t3c wasn't following", async () => {
+  const { gateway, store, history } = await setup();
+  const now = Date.now() / 1000;
+  const ts = (secondsAgo: number) => (now - secondsAgo).toFixed(6);
+  const root = ts(-1);
+  history.push(
+    { type: "message", channel: "C1", ts: root, user: "UBOB", text: "we used to have Manage Household?", reply_count: 2, latest_reply: ts(-3) },
+    { type: "message", channel: "C1", ts: ts(-2), thread_ts: root, user: "UBOB", text: "anyone?" },
+    { type: "message", channel: "C1", ts: ts(-3), thread_ts: root, user: "UALICE", text: `<@${BOT}> what happened to it?` },
+  );
+  const missed = await gateway.catchUp();
+  assert.deepEqual(missed.map((m) => [m.conversationId, m.text]), [[`C1:${root}`, "what happened to it?"]]);
+  for (const m of missed) store.enqueue(m);
+  assert.deepEqual(await gateway.catchUp(), []);
+});
