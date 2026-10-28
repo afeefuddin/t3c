@@ -16,10 +16,10 @@ import { httpGateway } from "./gateways/http.ts";
 import { SlackGateway } from "./gateways/slack.ts";
 import { color, errorMessage, log, preview } from "./log.ts";
 import { createApp } from "./server.ts";
-import { addGithub, addHttp, addSlack, chooseModel, githubToken, remove } from "./setup.ts";
+import { addGithub, addHttp, addSlack, applyChanges, chooseModel, githubToken, remove } from "./setup.ts";
 import { Store } from "./store.ts";
 import { RUNTIME_MODES, type RuntimeMode, T3Client } from "./t3.ts";
-import { say } from "./ui.ts";
+import { confirm, say } from "./ui.ts";
 import { Worker } from "./worker.ts";
 
 /** How often followed conversations are checked for messages that never arrived as webhooks. */
@@ -29,7 +29,8 @@ const SUPERVISE_INTERVAL_MS = 2 * 60_000;
 
 const USAGE = `${color("bold", "t3c")} — start T3 Code threads from Slack, GitHub and webhooks
 
-${color("bold", "Set up")} (once, in this order)
+${color("bold", "Set up")}
+  t3c setup                      guided: connect T3 Code and Slack, pick the agent, start
   t3c login                      connect t3c to T3 Code
   t3c add slack                  connect Slack, or update its app and settings
   t3c add github <owner/repo>    let /t3c comments in a repo start work
@@ -70,18 +71,19 @@ const entry = process.argv[1];
 
 try {
   switch (values.help ? undefined : command) {
+    case "setup":
+      await setup();
+      break;
+
     case "login":
-      say.step("Connect t3c to T3 Code");
-      say.info("Approving t3c with a one-time pairing code from the `t3` CLI…");
-      await t3Auth().login();
-      if (!loadConfig().model) await chooseModel();
-      say.ok("Connected. Next: `t3c add slack` or `t3c add github <owner/repo>`.");
+      await login();
+      say.info("Next: `t3c add slack` or `t3c add github <owner/repo>`.");
       break;
 
     case "add":
       if (rest[0] === "slack") await addSlack();
       else if (rest[0] === "github") await addGithub(rest[1] ?? "");
-      else if (rest[0] === "http") addHttp();
+      else if (rest[0] === "http") await addHttp();
       else throw new Error("Usage: t3c add slack | github <owner/repo> | http");
       break;
 
@@ -95,12 +97,14 @@ try {
       saveConfig({ ...loadConfig(), runtimeMode: mode });
       say.ok(`Threads started by t3c will run as ${mode}.`);
       if (mode === "full-access") say.warn("Full access: an agent started from Slack or GitHub can run any command on this machine without asking.");
-      say.hint("t3c logs in to T3 again by itself for the new mode. Changes apply after `t3c restart`.");
+      say.hint("t3c logs in to T3 again by itself for the new mode.");
+      await applyChanges();
       break;
     }
 
     case "model":
       await chooseModel();
+      await applyChanges();
       break;
 
     case "agent":
@@ -182,6 +186,36 @@ try {
 } catch (error) {
   console.error(`${color("red", "✗")} ${errorMessage(error)}`);
   process.exitCode = 1;
+}
+
+/** Connects t3c to T3 Code and picks the threads' model, if that isn't done yet. */
+async function login() {
+  say.step("Connect t3c to T3 Code");
+  say.info("Approving t3c with a one-time pairing code from the `t3` CLI…");
+  await t3Auth().login();
+  say.ok("Connected to T3 Code.");
+  if (!loadConfig().model) await chooseModel();
+}
+
+/** `t3c setup`: everything a first run needs, skipping what's already done, then starts t3c. */
+async function setup() {
+  if (isLoggedIn(paths.auth)) say.ok("Connected to T3 Code.");
+  else await login();
+  const config = loadConfig();
+  if (!config.agent && codexReady() && (await confirm("Let Codex decide what to do with messages? (recommended: it picks the project and writes each task)"))) {
+    saveConfig({ ...config, agent: { provider: "codex" } });
+    say.ok("Codex decides what to do with messages.");
+  }
+  await addSlack(); // ends by starting (or restarting) t3c
+}
+
+function codexReady() {
+  try {
+    execFileSync("codex", ["login", "status"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** `t3c messages`: work in progress, then the latest messages in both directions. */
@@ -294,17 +328,15 @@ async function agent(provider: string | undefined) {
     delete config.agent;
     saveConfig(config);
     say.ok("Agent off: messages follow the fixed rules (the configured project, follow-ups to the latest thread).");
+    await applyChanges();
   } else if (provider === "codex") {
-    try {
-      execFileSync("codex", ["login", "status"], { stdio: "ignore" });
-    } catch {
-      throw new Error("Codex isn't installed or logged in. Install it and run `codex login`.");
-    }
+    if (!codexReady()) throw new Error("Codex isn't installed or logged in. Install it and run `codex login`.");
     config.agent = { provider: "codex", ...(values.model ? { model: values.model } : {}) };
     saveConfig(config);
     say.ok(`Codex now decides what to do with messages${values.model ? ` (model ${values.model})` : ""}.`);
     say.info(`Skills: add <name>/SKILL.md folders to ${paths.skills}; one named like a built-in skill replaces it.`);
-    say.hint("If Codex fails, t3c falls back to the fixed rules. Apply with `t3c restart`.");
+    say.hint("If Codex fails, t3c falls back to the fixed rules.");
+    await applyChanges();
   } else {
     say.info(config.agent ? `Agent: ${config.agent.provider}${config.agent.model ? ` (${config.agent.model})` : ""}` : "Agent: off (fixed rules)");
     say.hint("t3c agent codex [--model <m>] | t3c agent off");

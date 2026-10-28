@@ -442,6 +442,74 @@ function isDm(channel: string) {
   return channel.startsWith("D");
 }
 
+/** Bot scopes the manifest asks for. */
+export const SLACK_BOT_SCOPES = [
+  "app_mentions:read",
+  "channels:history",
+  "channels:read",
+  "groups:history",
+  "groups:read",
+  "im:history",
+  "im:read",
+  "chat:write",
+  "files:read",
+  "reactions:write",
+  "users:read",
+];
+
+/** Opens Slack's "create app" flow with the manifest filled in. */
+export function slackNewAppUrl(manifest: unknown) {
+  return `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(manifest))}`;
+}
+
+/** The scopes a bot token has, and its app's id (for links to the app's settings pages). */
+export async function slackAppInfo(token: string): Promise<{ appId?: string; scopes: string[] }> {
+  const res = await fetch("https://slack.com/api/auth.test", { method: "POST", headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) });
+  const auth = await res.json();
+  if (!auth.ok) throw new Error(`Slack auth.test failed: ${auth.error}`);
+  const scopes = (res.headers.get("x-oauth-scopes") ?? "").split(",").filter(Boolean);
+  const bot = await slackApi(token)("bots.info", { bot: auth.bot_id }).catch(() => undefined);
+  return { appId: bot?.bot?.app_id, scopes };
+}
+
+/**
+ * Slack users from what people know: @handles, display or real names, or member ids.
+ * Returns an error message for anything that matches nobody or more than one person.
+ */
+export async function findSlackUsers(slack: SlackCall, wanted: string[]): Promise<{ users: { id: string; name: string }[] } | { error: string }> {
+  type Member = { id: string; name: string; deleted?: boolean; is_bot?: boolean; real_name?: string; profile?: { display_name?: string; real_name?: string; email?: string } };
+  let members: Member[] | undefined;
+  const users: { id: string; name: string }[] = [];
+  for (const raw of wanted) {
+    const query = raw.replace(/^<?@/, "").replace(/>$/, "").trim();
+    if (/^[UW][A-Z0-9]{6,}$/.test(query)) {
+      const found = await slack("users.info", { user: query }).catch(() => undefined);
+      if (!found?.user) return { error: `${raw} isn't a member of this workspace.` };
+      users.push({ id: query, name: found.user.profile?.display_name || found.user.real_name || found.user.name });
+      continue;
+    }
+    if (!members) {
+      members = [];
+      let cursor = "";
+      do {
+        const page = await slack("users.list", { limit: "200", ...(cursor ? { cursor } : {}) });
+        members.push(...(page.members as Member[]).filter((m) => !m.deleted && !m.is_bot && m.id !== "USLACKBOT"));
+        cursor = page.response_metadata?.next_cursor ?? "";
+      } while (cursor);
+    }
+    const q = query.toLowerCase();
+    const names = (m: Member) => [m.name, m.profile?.display_name, m.profile?.real_name, m.real_name, m.profile?.email].filter(Boolean).map((n) => n!.toLowerCase());
+    let matches = members.filter((m) => names(m).includes(q));
+    if (matches.length === 0) matches = members.filter((m) => names(m).some((n) => n.split(/[\s.@]/).includes(q)));
+    if (matches.length === 0) return { error: `Nobody in this workspace is called "${raw}".` };
+    if (matches.length > 1) {
+      return { error: `"${raw}" could be ${matches.map((m) => `@${m.profile?.display_name || m.name} (${m.profile?.real_name || m.real_name || m.id})`).join(", ")}. Be more specific.` };
+    }
+    users.push({ id: matches[0].id, name: matches[0].profile?.display_name || matches[0].real_name || matches[0].name });
+  }
+  return { users };
+}
+
 export function slackManifest(publicUrl: string, name = "t3bot") {
   return {
     display_information: { name, description: "Starts T3 Code threads from Slack.", background_color: "#1f2328" },
@@ -451,21 +519,7 @@ export function slackManifest(publicUrl: string, name = "t3bot") {
       app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false },
     },
     oauth_config: {
-      scopes: {
-        bot: [
-          "app_mentions:read",
-          "channels:history",
-          "channels:read",
-          "groups:history",
-          "groups:read",
-          "im:history",
-          "im:read",
-          "chat:write",
-          "files:read",
-          "reactions:write",
-          "users:read",
-        ],
-      },
+      scopes: { bot: SLACK_BOT_SCOPES },
     },
     settings: {
       event_subscriptions: {
