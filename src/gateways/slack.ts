@@ -27,6 +27,9 @@ export interface SlackEvent {
   bot_id?: string;
   subtype?: string;
   text?: string;
+  /** On a thread's first message: how many replies, and the newest one's ts. */
+  reply_count?: number;
+  latest_reply?: string;
   /** Uploaded files: screenshots, logs, PDFs, snippets. */
   files?: SlackFile[];
   /** Link previews, forwarded messages and bot cards (CI, Sentry, …). */
@@ -72,6 +75,8 @@ const PERSON_SUBTYPES = new Set(["file_share", "thread_broadcast"]);
 /** Catch-up reads threads with activity in this window, at most this many. */
 const CATCH_UP_WINDOW_MS = 24 * 60 * 60_000;
 const CATCH_UP_THREADS = 10;
+/** How far back catch-up looks for threads with new replies. */
+const THREAD_LOOKBACK_MS = 7 * 24 * 60 * 60_000;
 
 /** How long the list of channels the bot is in is reused by catch-up. */
 const CHANNELS_TTL_MS = 5 * 60_000;
@@ -150,24 +155,40 @@ export class SlackGateway implements Gateway {
   }
 
   /**
-   * New top-level requests (mentions, or any message in a DM) in each channel the bot is in since
-   * t3c was first seen working there (or started), at most a day back, so requests from before
-   * t3c was there aren't replayed.
+   * New requests (mentions, or any message in a DM) in each channel the bot is in since t3c was
+   * first seen working there (or started), at most a day back, so requests from before t3c was
+   * there aren't replayed. Covers top-level messages and replies in threads t3c isn't following
+   * yet (someone mentions the bot under another person's message); followed threads are
+   * missedReplies' job.
    */
   private async missedMentions(): Promise<InboundMessage[]> {
     const mention = `<@${this.botUserId}>`;
     const missed: InboundMessage[] = [];
+    const isRequest = (channel: string, m: SlackEvent) => isDm(channel) || Boolean(m.text?.includes(mention));
+    const replay = (channel: string, m: SlackEvent) => {
+      const message = this.toMessage({ ...m, type: isDm(channel) ? "message" : "app_mention", channel }, { quiet: true });
+      if (message) missed.push(message);
+    };
     for (const channel of await this.memberChannels()) {
       const firstSeen = this.store.firstInboundAt(this.name, `${channel}:`);
       const live = Math.min(this.startedAt, firstSeen ? Date.parse(firstSeen) / 1000 : Infinity);
       const oldest = Math.max(live, Date.now() / 1000 - CATCH_UP_WINDOW_MS / 1000);
-      const { messages } = await this.slack("conversations.history", { channel, oldest: oldest.toFixed(6), limit: "100" });
+      // A thread can get a new reply long after its first message, so look further back for those.
+      const { messages } = await this.slack("conversations.history", {
+        channel,
+        oldest: (Date.now() / 1000 - THREAD_LOOKBACK_MS / 1000).toFixed(6),
+        limit: "200",
+      });
       // Newest first from Slack; handled oldest first.
       for (const m of (messages as SlackEvent[]).toReversed()) {
         if (m.thread_ts && m.thread_ts !== m.ts) continue;
-        if (!isDm(channel) && !m.text?.includes(mention)) continue;
-        const message = this.toMessage({ ...m, type: isDm(channel) ? "message" : "app_mention", channel }, { quiet: true });
-        if (message) missed.push(message);
+        if (Number(m.ts) > oldest && isRequest(channel, m)) replay(channel, m);
+        const followed = this.store.findConversation(this.name, `${channel}:${m.ts}`);
+        if (!m.reply_count || Number(m.latest_reply) <= oldest || followed) continue;
+        const { messages: replies } = await this.slack("conversations.replies", { channel, ts: m.ts, oldest: oldest.toFixed(6), limit: "200" });
+        for (const r of replies as SlackEvent[]) {
+          if (r.ts !== m.ts && Number(r.ts) > oldest && isRequest(channel, r)) replay(channel, { ...r, thread_ts: m.ts });
+        }
       }
     }
     return missed;
