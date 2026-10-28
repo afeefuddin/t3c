@@ -225,11 +225,16 @@ export class ConversationTools {
     });
   }
 
-  /** Stops a thread's running turn, e.g. when it's stuck. Send it a message afterwards to restart it. */
+  /**
+   * Stops a thread's running turn, and with it the wait for its answer: a thread that was called off
+   * doesn't come back as finished. Send it a message afterwards to restart it.
+   */
   interruptThread(input: { label: string; reason: string }) {
     return this.record("interrupt_thread", input, async () => {
       const thread = this.thread(input.label);
       await this.ctx.t3.interruptThread(thread.t3ThreadId!, input.reason);
+      const since = this.ctx.store.getThread(thread.id)?.awaitingSince;
+      if (since) this.ctx.store.clearAwaiting(thread.id, since);
       log(this.ctx.conversation.source, `⏹ interrupted T3 thread ${thread.t3ThreadId} (${thread.label}): ${input.reason}`, "warn");
       return { interrupted: true, thread: thread.label };
     });

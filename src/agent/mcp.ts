@@ -117,7 +117,7 @@ function buildServer(tools: ConversationTools, skills: Skill[]) {
   );
   add(
     "interrupt_thread",
-    "Stop a thread's running turn (it's stuck or going the wrong way). Then send_to_thread to restart it with directions.",
+    "Stop a thread's running turn: the person called the work off (\"nvm\", \"stop\", \"cancel that\"), or it's stuck or going the wrong way. It stays stopped; to redirect it, send_to_thread afterwards with directions.",
     { label: z.string().describe("The thread's label"), reason: z.string().max(2_000) },
     (i) => tools.interruptThread(i),
   );
