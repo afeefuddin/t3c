@@ -1,10 +1,11 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentEvent, Brain } from "../brain.ts";
 import { errorMessage, log } from "../log.ts";
+import type { Attachment } from "../t3.ts";
 import type { ConversationTools } from "./tools.ts";
 import type { AgentToolServer } from "./mcp.ts";
 import { agentPrompt } from "./prompts.ts";
@@ -66,9 +67,11 @@ export class CodexBrain implements Brain {
     try {
       // Without the source the run still works; start_thread reports the same error if it matters.
       const source = event.type === "message" ? await tools.source().catch((error) => void log("agent", `couldn't fetch the source: ${errorMessage(error)}`, "warn")) : undefined;
-      const prompt = agentPrompt(event, await tools.getConversation(), skills, source);
+      // The screenshots people share, so the run sees what they're pointing at.
+      const images = event.type === "message" ? await tools.images().catch((error) => (log("agent", `couldn't fetch images: ${errorMessage(error)}`, "warn"), [])) : [];
+      const prompt = agentPrompt(event, await tools.getConversation(), skills, source, images.map((i) => i.name));
       this.lockdown ??= lockdownArgs(this.options.codexBin ?? "codex");
-      return await this.exec(prompt, token, await this.lockdown);
+      return await this.exec(prompt, token, await this.lockdown, images);
     } catch (error) {
       if (tools.acted) throw error;
       log("agent", `codex failed before acting (${errorMessage(error)}); using the simple rules`, "warn");
@@ -78,10 +81,15 @@ export class CodexBrain implements Brain {
     }
   }
 
-  private exec(prompt: string, token: string, lockdown: string[]): Promise<string> {
+  private exec(prompt: string, token: string, lockdown: string[], images: Attachment[] = []): Promise<string> {
     const { workDir, toolsUrl, model, codexBin = "codex", timeoutMs = 5 * 60_000 } = this.options;
     mkdirSync(workDir, { recursive: true });
     const outFile = join(workDir, `last-${token.slice(0, 8)}.txt`);
+    const imageFiles = images.map((image, i) => {
+      const file = join(workDir, `image-${token.slice(0, 8)}-${i}${extension(image.mimeType)}`);
+      writeFileSync(file, image.data, { mode: 0o600 });
+      return file;
+    });
     const args = [
       "exec",
       ...lockdown,
@@ -104,6 +112,9 @@ export class CodexBrain implements Brain {
       ...(model ? ["-m", model] : []),
       "-o",
       outFile,
+      ...(imageFiles.length > 0 ? ["--image", ...imageFiles] : []),
+      // --image takes several files: the prompt goes after "--" so it isn't read as one.
+      "--",
       prompt,
     ];
     return new Promise((resolve, reject) => {
@@ -124,7 +135,7 @@ export class CodexBrain implements Brain {
         try {
           last = readFileSync(outFile, "utf8").trim();
         } catch {}
-        rmSync(outFile, { force: true });
+        for (const file of [outFile, ...imageFiles]) rmSync(file, { force: true });
         if (code === 0) resolve(last.split("\n").at(-1) || "done");
         else reject(new Error(signal ? `codex timed out after ${timeoutMs / 1000}s` : `codex exited ${code}: ${lastLine(stderr)}`));
       });
@@ -152,6 +163,10 @@ export async function lockdownArgs(codexBin: string, codexHome = process.env.COD
     // Older Codex without `features list`: the sandbox and MCP lockdown still apply.
   }
   return args;
+}
+
+function extension(mimeType: string) {
+  return { "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp" }[mimeType] ?? "";
 }
 
 function lastLine(text: string) {

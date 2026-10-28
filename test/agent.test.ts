@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -196,4 +196,22 @@ test("the earlier Slack thread is in the prompt when there is one, and absent fo
   const topLevel = agentPrompt(event, {}, skills);
   assert.doesNotMatch(topLevel, /# Source|<source>/);
   assert.doesNotMatch(topLevel, /call fetch_source first/);
+});
+
+test("the agent sees the images shared in the conversation, and only images", async () => {
+  const seenFile = join(mkdtempSync(join(tmpdir(), "t3c-seen-")), "seen.json");
+  process.env.FAKE_CODEX_SEEN = seenFile;
+  try {
+    const { gateway, worker } = setup();
+    const file = (name: string, mimeType: string) => ({ name, mimeType, size: 3, url: `https://files/${name}` });
+    gateway.preparation = { files: [file("before.png", "image/png"), file("build.log", "text/plain")] };
+    gateway.files.set("https://files/before.png", "old").set("https://files/now.jpg", "new").set("https://files/build.log", "log");
+    worker.enqueue(message({ files: [file("now.jpg", "image/jpeg")] }));
+    await worker.idle();
+    const seen = JSON.parse(readFileSync(seenFile, "utf8"));
+    assert.deepEqual(seen.images, ["old", "new"]);
+    assert.match(seen.prompt, /attached to this prompt: before\.png, now\.jpg/);
+  } finally {
+    delete process.env.FAKE_CODEX_SEEN;
+  }
 });
