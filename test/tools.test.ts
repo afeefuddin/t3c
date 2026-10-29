@@ -16,6 +16,7 @@ function setup(projects = ["demo"]) {
   const store = new Store(":memory:");
   const gateway = new FakeGateway();
   const stored = store.enqueue(message({ projects }))!;
+  store.takePending(); // the run's own request, as the worker hands it over
   const conversation = store.getConversation(stored.conversationId)!;
   const tools = () => new ConversationTools({ store, dispatcher: new Dispatcher(t3, store), t3, gateway, conversation });
   return { t3, store, gateway, conversation, tools };
@@ -209,4 +210,19 @@ test("start_thread runs in its own worktree when asked, from the default branch,
   t3.projects[1].workspaceRoot = mkdtempSync(join(tmpdir(), "t3c-plain-"));
   await assert.rejects(run.startThread({ project: "Web", title: "x", worktree: true, label: "w" }), /isn't a git repository/);
   assert.equal(t3.launches.length, 2);
+});
+
+test("reply hands back messages that arrived during the run instead of posting, once; they're the run's from then on", async () => {
+  const { store, gateway, conversation, tools } = setup();
+  const run = tools();
+  const late = store.enqueue(message({ eventKey: "late", text: "actually make it red" }))!;
+  const first = await run.reply({ text: "Done, it's blue." });
+  assert.equal(first.posted, false);
+  assert.deepEqual(!first.posted && first.newMessages, [{ author: "alice", text: "actually make it red" }]);
+  assert.equal(gateway.replies.length, 0);
+  assert.deepEqual(run.lateMessages.map((m) => m.id), [late.id]);
+  assert.equal(store.getMessage(late.id)?.status, "processing"); // no other run will take it
+  assert.equal(store.nextPending(), undefined);
+  assert.deepEqual(await run.reply({ text: "Switching it to red." }), { posted: true });
+  assert.deepEqual(gateway.replies, [{ conversationId: conversation.externalId, text: "Switching it to red." }]);
 });

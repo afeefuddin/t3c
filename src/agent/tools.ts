@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import type { Dispatcher } from "../dispatch.ts";
 import type { FileRef, Gateway, InboundMessage, Preparation, Worktree } from "../gateway.ts";
 import { errorMessage, log } from "../log.ts";
-import type { AgentRun, Conversation, Store, ThreadRecord } from "../store.ts";
+import type { AgentRun, Conversation, Store, StoredMessage, ThreadRecord } from "../store.ts";
 import { ATTACHMENT_LIMITS, type Attachment, attachmentType, type T3 } from "../t3.ts";
 import { threadPrompt } from "./prompts.ts";
 import type { Skill } from "./skills.ts";
@@ -30,19 +30,24 @@ export interface ToolContext {
  */
 export class ConversationTools {
   readonly actions: AgentRun["actions"] = [];
+  /** Messages that arrived while the run was busy and that it took in (see reply). */
+  readonly lateMessages: StoredMessage[] = [];
   private readonly ctx: ToolContext;
+  /** Files sent with the messages this run handles; they go to whichever thread gets the work. */
+  private readonly requestFiles: FileRef[];
   private replies = 0;
   private launches = 0;
   private preparation: Promise<Preparation> | undefined;
   /** Threads list_threads showed this run, by T3 id: the only others the run may read or message. */
   private readonly listed = new Map<string, { projectId: string; title: string }>();
-  /** Threads this run already handed the request's files. */
-  private readonly filesSent = new Set<string>();
+  /** Per thread, how many of the request's files this run already handed it. */
+  private readonly filesSent = new Map<string, number>();
   /** Downloads by url, so the agent's images and a thread's attachments are fetched once. */
   private readonly downloads = new Map<string, Promise<Attachment | undefined>>();
 
   constructor(ctx: ToolContext) {
     this.ctx = ctx;
+    this.requestFiles = [...(ctx.requestFiles ?? [])];
   }
 
   get conversation() {
@@ -97,7 +102,7 @@ export class ConversationTools {
    * agent can look at the screenshots people share. Without recording a tool call.
    */
   async images(): Promise<Attachment[]> {
-    const files = [...((await this.prepare()).files ?? []), ...(this.ctx.requestFiles ?? [])];
+    const files = [...((await this.prepare()).files ?? []), ...this.requestFiles];
     const images = files.filter((f) => attachmentType(f.mimeType) === "image");
     return this.download(images.slice(-ATTACHMENT_LIMITS.perMessage));
   }
@@ -184,7 +189,7 @@ export class ConversationTools {
 
       const sentAt = new Date().toISOString();
       // Everything shared in the conversation so far, newest kept when there are too many.
-      const files = [...(preparation.files ?? []), ...(this.ctx.requestFiles ?? [])];
+      const files = [...(preparation.files ?? []), ...this.requestFiles];
       const result = await dispatcher.launch(conversation, {
         label,
         project: project.title,
@@ -198,7 +203,7 @@ export class ConversationTools {
       if (result.status === "in_progress") throw new Error(`Thread "${label}" is still starting.`);
       if (result.status === "launched") {
         this.launches++;
-        this.filesSent.add(result.thread.id);
+        this.filesSent.set(result.thread.id, this.requestFiles.length);
         store.setAwaiting(result.thread.id, sentAt);
         log(conversation.source, `→ started T3 thread ${result.thread.t3ThreadId} in ${project.title} (${conversation.externalId})`, "ok");
       }
@@ -216,9 +221,9 @@ export class ConversationTools {
       if (!input.threadId && !input.label) throw new Error("Give the thread's label, or a threadId from list_threads.");
       const thread = input.threadId ? this.attach(input.threadId) : this.thread(input.label!);
       const sentAt = new Date().toISOString();
-      const files = this.filesSent.has(thread.id) ? [] : (this.ctx.requestFiles ?? []);
+      const files = this.requestFiles.slice(this.filesSent.get(thread.id) ?? 0);
       await this.ctx.dispatcher.send(thread, input.text, await this.download(files.slice(-ATTACHMENT_LIMITS.perMessage)));
-      this.filesSent.add(thread.id);
+      this.filesSent.set(thread.id, this.requestFiles.length);
       this.ctx.store.setAwaiting(thread.id, sentAt);
       log(this.ctx.conversation.source, `→ sent follow-up to T3 thread ${thread.t3ThreadId} (${thread.label})`, "ok");
       return { sent: true, thread: thread.label };
@@ -240,16 +245,32 @@ export class ConversationTools {
     });
   }
 
-  /** Posts into this conversation (Markdown). */
+  /**
+   * Posts into this conversation (Markdown). If the person wrote more since this run began, that
+   * comes back instead and nothing is posted: chat is read top to bottom, so the run decides, with
+   * the new messages in view, whether to post as is (calling reply again), rewrite, or pass them to
+   * a thread first. They're this run's to handle from then on.
+   */
   reply(input: { text: string }) {
-    return this.record("reply", input, () => {
+    return this.record("reply", input, async (): Promise<{ posted: true } | { posted: false; newMessages: { author: string; text: string }[]; note: string }> => {
       // Chat replies are read on a phone between other things: anything longer gets rewritten.
       if (input.text.length > LIMITS.replyChars) {
         throw new Error(
           `Too long for chat (${input.text.length} characters, max ${LIMITS.replyChars}). Rewrite it as one or two short sentences with just the answer.`,
         );
       }
-      return this.post(input.text);
+      const late = this.ctx.store.takePending(this.ctx.conversation.id);
+      if (late.length === 0) return this.post(input.text);
+      this.lateMessages.push(...late);
+      this.requestFiles.push(...late.flatMap((m) => m.inbound?.files ?? []));
+      return {
+        posted: false,
+        newMessages: late.map((m) => ({ author: m.author, text: m.text })),
+        note:
+          "Not posted: they wrote this after you started, below where your reply would go. Handle it in this run, " +
+          "it won't come back as its own event. Post as is (call reply again), rewrite the reply to cover it, " +
+          "or send_to_thread first and let that answer cover everything.",
+      };
     });
   }
 
@@ -273,7 +294,7 @@ export class ConversationTools {
       : projects.filter((p) => allowed.some((a) => a === p.id || a.toLowerCase() === p.title.toLowerCase()));
   }
 
-  private async post(text: string) {
+  private async post(text: string): Promise<{ posted: true }> {
     const { gateway, store, conversation } = this.ctx;
     if (!gateway.reply) throw new Error(`${gateway.name} conversations can't be replied to.`);
     if (this.replies >= LIMITS.replies) throw new Error(`At most ${LIMITS.replies} replies per run.`);

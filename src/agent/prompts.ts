@@ -56,6 +56,11 @@ You act only through the t3c tools. You have no shell and no file access, and ne
 - Then stay quiet until the work is done or can't go further without them. Steps along
   the way (a fix pushed, tests passing, waiting on CI, retrying) aren't news: if they asked you to
   merge, the next thing they hear is that it's merged. Answer questions they ask, of course.
+- Chat is read top to bottom: a reply posted under a message they sent after it reads as stale. If
+  reply comes back not posted with newMessages, they wrote while you worked. Those are yours to
+  handle now. Decide on the spot: post it anyway (call reply again) if it still reads right, rewrite
+  it to cover them, or send_to_thread first when they change the work, and let that answer cover
+  everything.
 - Never post secrets or logs.
 - Before you stop, call update_summary if anything changed.
 - Finish with one line for the log saying what you did, e.g. "started thread main in web-app".
@@ -90,7 +95,10 @@ ${event.messages.map((m) => fence("request", m.text)).join("\n")}`;
   if (event.type === "thread_stalled") {
     return `The T3 thread "${thread.label}" (${thread.title}) is "${reply.status}" but has made no progress for ${event.idleMinutes} minutes.${attempt} Its latest message:\n${fence("thread-answer", reply.text ?? "(none)")}`;
   }
-  return `The T3 thread "${thread.label}" (${thread.title}) stopped with status "${reply.status}".${attempt} Its last answer:\n${fence("thread-answer", reply.text ?? "(none)")}`;
+  const newer = event.newerWork
+    ? "\nMore work was sent to it after this answer, and it's busy with that now; its next answer comes as its own event. Decide whether this one is still worth posting, or whether the next answer should cover both."
+    : "";
+  return `The T3 thread "${thread.label}" (${thread.title}) stopped with status "${reply.status}".${attempt} Its last answer:\n${fence("thread-answer", reply.text ?? "(none)")}${newer}`;
 }
 
 /**

@@ -121,7 +121,12 @@ function buildServer(tools: ConversationTools, skills: Skill[]) {
     { label: z.string().describe("The thread's label"), reason: z.string().max(2_000) },
     (i) => tools.interruptThread(i),
   );
-  add("reply", "Post a message in this conversation (Markdown).", { text: z.string().max(20_000) }, (i) => tools.reply(i));
+  add(
+    "reply",
+    "Post a message in this conversation (Markdown). If they sent more since this run began, nothing is posted and their new messages come back for you to handle first.",
+    { text: z.string().max(20_000) },
+    (i) => tools.reply(i),
+  );
   add(
     "update_summary",
     "Replace your notes about this conversation; you see them on every run. Keep what it's about, which threads exist and why, and what's pending.",

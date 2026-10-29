@@ -327,3 +327,107 @@ test("work that's called off stays stopped: its stop doesn't wake the brain to c
   assert.deepEqual(gateway.replies.map((r) => r.text), ["Stopped 👍"]);
   assert.deepEqual(store.awaitingThreads(), []);
 });
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+test("a message sent while the agent is answering is shown to it before anything is posted, and it decides", async () => {
+  const seen: { event: string; newMessages?: string[] }[] = [];
+  const brain: Brain = {
+    name: "test",
+    async handle(event, tools) {
+      if (event.type === "message") {
+        seen.push({ event: event.messages.map((m) => m.text).join(" + ") });
+        if (tools.launchedThreads().length === 0) await tools.startThread({ project: "Demo", title: "t" });
+        return "ok";
+      }
+      seen.push({ event: event.type });
+      await sleep(60); // writing the answer
+      const first = await tools.reply({ text: "Done: the button is blue now." });
+      if (first.posted) return "posted";
+      seen.at(-1)!.newMessages = first.newMessages.map((m) => m.text);
+      // Its own call: the news still reads right with the question folded in.
+      await tools.reply({ text: "Done: the button is blue now, and yes, dark mode too." });
+      return "posted, covering the newer message";
+    },
+  };
+  const { store, gateway, worker } = setup({ brain });
+  worker.enqueue(message({ eventKey: "a", text: "make the button blue" }));
+  await sleep(30); // the thread has answered; the agent is writing it up
+  const late = worker.enqueue(message({ eventKey: "b", text: "dark mode too?" }))!;
+  await worker.idle();
+
+  assert.deepEqual(seen, [{ event: "make the button blue" }, { event: "thread_finished", newMessages: ["dark mode too?"] }]);
+  assert.deepEqual(gateway.replies.map((r) => r.text), ["Done: the button is blue now, and yes, dark mode too."]);
+  assert.equal(store.getMessage(late.id)?.status, "done"); // handled by that run, not a run of its own
+  assert.deepEqual(gateway.acks, ["a", "b"]);
+});
+
+test("the agent can also post as planned after seeing the newer message", async () => {
+  const brain: Brain = {
+    name: "test",
+    async handle(event, tools) {
+      if (event.type === "message") {
+        if (tools.launchedThreads().length === 0) await tools.startThread({ project: "Demo", title: "t" });
+        return "ok";
+      }
+      await sleep(60);
+      const first = await tools.reply({ text: "Fixed in #12." });
+      if (!first.posted) await tools.reply({ text: "Fixed in #12." }); // "thanks!" changes nothing
+      return "posted";
+    },
+  };
+  const { gateway, worker } = setup({ brain });
+  worker.enqueue(message({ eventKey: "a" }));
+  await sleep(30);
+  worker.enqueue(message({ eventKey: "b", text: "thanks!" }));
+  await worker.idle();
+  assert.deepEqual(gateway.replies.map((r) => r.text), ["Fixed in #12."]);
+});
+
+test("the fixed rules pass a message sent during the answer to the thread, and post only the answer covering it", async () => {
+  const simple = new SimpleBrain();
+  const brain: Brain = {
+    name: "test",
+    async handle(event, tools) {
+      if (event.type === "thread_finished" && event.reply.text === "blue done") await sleep(60); // writing it up
+      return simple.handle(event, tools);
+    },
+  };
+  const { t3, store, gateway, worker } = setup({ brain });
+  t3.answers = [{ status: "completed", text: "blue done" }, { status: "completed", text: "blue and dark mode done" }];
+  worker.enqueue(message({ eventKey: "a", text: "make the button blue" }));
+  await sleep(30);
+  const late = worker.enqueue(message({ eventKey: "b", text: "dark mode too" }))!;
+  await worker.idle();
+
+  assert.deepEqual(t3.sends.map((s) => s.message), ["dark mode too"]);
+  assert.deepEqual(answers(gateway).map((r) => r.text), ["blue and dark mode done"]);
+  assert.equal(store.getMessage(late.id)?.status, "done");
+});
+
+test("an answer that newer work already overtook says so, and the fixed rules don't post it", async () => {
+  const events: AgentEvent[] = [];
+  const simple = new SimpleBrain();
+  const brain: Brain = {
+    name: "test",
+    async handle(event, tools) {
+      events.push(event);
+      if (event.type === "message" && event.messages[0].text === "dark mode too") await sleep(60); // still sending it on
+      return simple.handle(event, tools);
+    },
+  };
+  const { t3, gateway, worker } = setup({ brain });
+  let release!: () => void;
+  t3.gate = new Promise((r) => (release = r));
+  t3.answers = [{ status: "completed", text: "blue done" }, { status: "completed", text: "blue and dark mode done" }];
+  worker.enqueue(message({ eventKey: "a", text: "make the button blue" }));
+  await sleep(30);
+  worker.enqueue(message({ eventKey: "b", text: "dark mode too" }));
+  await sleep(20); // its run is going
+  release(); // the thread answers the first request meanwhile
+  await worker.idle();
+
+  const finished = events.filter((e) => e.type === "thread_finished");
+  assert.deepEqual(finished.map((e) => [e.reply.text, e.newerWork ?? false]), [["blue done", true], ["blue and dark mode done", false]]);
+  assert.deepEqual(answers(gateway).map((r) => r.text), ["blue and dark mode done"]);
+});

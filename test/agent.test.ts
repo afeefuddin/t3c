@@ -98,6 +98,7 @@ test("tool calls need the run's token, and stop working when the run ends", asyn
   const gateway = new FakeGateway();
   const t3 = new FakeT3();
   const stored = store.enqueue(message())!;
+  store.takePending(); // the run's own request, as the worker hands it over
   const conversation = store.getConversation(stored.conversationId)!;
   const tools = new ConversationTools({ store, dispatcher: new Dispatcher(t3, store), t3, gateway, conversation });
 

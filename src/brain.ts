@@ -7,8 +7,11 @@ import type { ConversationTools } from "./agent/tools.ts";
 export type AgentEvent =
   /** Everything the person sent since the last run, oldest first: often one request in pieces. */
   | { type: "message"; messages: StoredMessage[] }
-  /** `attempt` counts this thread's waiting/failed/stuck episodes in a row without progress. */
-  | { type: "thread_finished"; thread: ThreadRecord; reply: ThreadReply; attempt: number }
+  /**
+   * `attempt` counts this thread's waiting/failed/stuck episodes in a row without progress.
+   * `newerWork`: more was sent to the thread after it gave this answer, and it's working on that.
+   */
+  | { type: "thread_finished"; thread: ThreadRecord; reply: ThreadReply; attempt: number; newerWork?: boolean }
   | { type: "thread_stalled"; thread: ThreadRecord; reply: ThreadReply; idleMinutes: number; attempt: number };
 
 /** What to tell a thread that's waiting, failed or stuck, so it carries on without a person. */
@@ -47,9 +50,11 @@ export class SimpleBrain implements Brain {
       return `${event.attempt > 1 ? "restarted" : "nudged"} stuck thread "${event.thread.label}"`;
     }
     if (event.type === "thread_finished") {
+      // Its answer to the newer work will cover this one.
+      if (event.newerWork) return `skipped the out-of-date answer of "${event.thread.label}"`;
       if (event.reply.status === "completed" || event.reply.status === "idle") {
-        await tools.reply({ text: describeReply(event.reply) });
-        return `posted the answer of "${event.thread.label}"`;
+        if (await replyOrForward(tools, describeReply(event.reply), event.thread.label)) return `posted the answer of "${event.thread.label}"`;
+        return `passed newer messages to "${event.thread.label}" instead of posting its answer`;
       }
       await tools.sendToThread({ label: event.thread.label, text: unblockMessage(event) });
       return `told "${event.thread.label}" (${event.reply.status}) to carry on`;
@@ -59,7 +64,7 @@ export class SimpleBrain implements Brain {
     if (threads.length > 0) {
       const latest = threads.at(-1)!;
       await tools.sendToThread({ label: latest.label, text: event.messages.map((m) => m.text).join("\n\n") });
-      if (tools.canReply) await tools.reply({ text: "Got it, on it 👍" });
+      if (tools.canReply) await replyOrForward(tools, "Got it, on it 👍", latest.label);
       return `sent the follow-up to "${latest.label}"`;
     }
 
@@ -71,8 +76,19 @@ export class SimpleBrain implements Brain {
     const project =
       projects.find((p) => p.name.toLowerCase() === named) ?? projects.find((p) => text.includes(p.name.toLowerCase())) ?? projects[0];
     const inbound = event.messages[0].inbound!;
-    await tools.startThread({ project: project.name, title: inbound.title });
-    if (tools.canReply) await tools.reply({ text: "On it! I'll post here when it's done 👀" });
+    const { label } = await tools.startThread({ project: project.name, title: inbound.title });
+    if (tools.canReply) await replyOrForward(tools, "On it! I'll post here when it's done 👀", label);
     return `started a thread in ${project.name}`;
   }
+}
+
+/**
+ * Posts `text`, unless the person wrote more while the run was busy: then that goes to the thread
+ * instead, and its next answer covers everything. Returns whether `text` was posted.
+ */
+async function replyOrForward(tools: ConversationTools, text: string, label: string): Promise<boolean> {
+  const result = await tools.reply({ text });
+  if (result.posted) return true;
+  await tools.sendToThread({ label, text: result.newMessages.map((m) => m.text).join("\n\n") });
+  return false;
 }

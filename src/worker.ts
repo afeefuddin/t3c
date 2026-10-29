@@ -90,6 +90,9 @@ export class Worker {
       return;
     }
     log(message.source, `← ${message.user} in ${message.conversationId}: ${preview(message.text)}`);
+    // Seen straight away, even when a run in the conversation is busy.
+    const gateway = this.gateways.get(message.source);
+    if (gateway) this.track(this.acknowledge(gateway, message));
     this.kick();
     return stored;
   }
@@ -106,43 +109,46 @@ export class Worker {
     this.draining ??= this.drain().finally(() => (this.draining = undefined));
   }
 
-  /** Handles waiting messages a conversation at a time: everything it has pending goes to one run. */
+  /**
+   * Handles waiting messages a conversation at a time: everything it has pending goes to one run.
+   * Messages are taken only once the conversation is free, so a run that's busy there when they
+   * arrive can take them in itself (see ConversationTools.reply).
+   */
   private async drain() {
-    for (let batch = this.store.takePending(); batch.length > 0; batch = this.store.takePending()) {
-      const conversation = this.store.getConversation(batch[0].conversationId)!;
+    for (let id = this.store.nextPending(); id; id = this.store.nextPending()) {
+      const conversation = this.store.getConversation(id)!;
       if (!this.gateways.has(conversation.source)) {
         // e.g. a gateway removed from the config while messages from it were queued.
+        const batch = this.store.takePending(id);
         log("t3c", `skipping ${batch.length} message(s) from "${conversation.source}": that gateway isn't configured`, "warn");
         for (const m of batch) this.store.finishMessage(m.id, `No gateway "${conversation.source}" is configured.`);
         continue;
       }
-      const gateway = this.gateway(conversation.source);
-      const error = await this.locked(conversation.id, async () => {
+      await this.locked(conversation.id, async () => {
+        const batch = this.store.takePending(conversation.id);
+        if (batch.length === 0) return; // a run that held the lock took them
         this.store.updateConversation(conversation.id, { state: "active" });
-        await this.untilQuiet(conversation.id, batch, (m) => this.acknowledge(gateway, m));
-        return this.run(conversation, { type: "message", messages: batch });
+        await this.untilQuiet(conversation.id, batch);
+        const error = await this.run(conversation, { type: "message", messages: batch });
+        for (const m of batch) this.store.finishMessage(m.id, error);
       });
-      for (const m of batch) this.store.finishMessage(m.id, error);
     }
   }
 
   /** Waits for a pause in the conversation, adding messages that arrive meanwhile to `batch`. */
-  private async untilQuiet(conversationId: string, batch: StoredMessage[], acknowledge: (m: StoredMessage) => Promise<void>) {
-    await Promise.all(batch.map(acknowledge));
+  private async untilQuiet(conversationId: string, batch: StoredMessage[]) {
     const deadline = Date.now() + MAX_QUIET_WAIT_MS;
     for (;;) {
       const wait = Math.min(this.quietMs - (Date.now() - Date.parse(batch.at(-1)!.createdAt)), deadline - Date.now());
       if (wait <= 0) return;
       await new Promise((r) => setTimeout(r, wait));
-      const more = this.store.takePending(conversationId);
-      await Promise.all(more.map(acknowledge));
-      batch.push(...more);
+      batch.push(...this.store.takePending(conversationId));
     }
   }
 
   /** Signals that a message was seen, e.g. a 👀 reaction. Best effort. */
-  private async acknowledge(gateway: Gateway, message: StoredMessage) {
-    await gateway.acknowledge?.(message.inbound!).catch((e) => log(gateway.name, `couldn't react: ${errorMessage(e)}`, "warn"));
+  private async acknowledge(gateway: Gateway, message: InboundMessage) {
+    await gateway.acknowledge?.(message).catch((e) => log(gateway.name, `couldn't react: ${errorMessage(e)}`, "warn"));
   }
 
   /** One brain run with conversation-scoped tools, recorded in agent_runs. Returns an error message, if any. */
@@ -154,11 +160,13 @@ export class Worker {
     try {
       const outcome = await this.brain.handle(event, tools);
       this.store.finishRun(run.id, { actions: tools.actions, outcome });
+      for (const m of tools.lateMessages) this.store.finishMessage(m.id);
       log(conversation.source, `✓ ${this.brain.name}: ${outcome} (${conversation.externalId})`);
       return;
     } catch (error) {
       const message = errorMessage(error);
       this.store.finishRun(run.id, { actions: tools.actions, error: message });
+      for (const m of tools.lateMessages) this.store.finishMessage(m.id, message);
       log(conversation.source, `✗ ${conversation.externalId}: ${message}`, "error");
       if (tools.repliesSent === 0 && gateway.reply) {
         await gateway
@@ -188,7 +196,7 @@ export class Worker {
             // Only the answer to the newest message counts; otherwise keep waiting.
             if (!this.store.clearAwaiting(thread.id, since)) continue;
             const conversation = this.store.getConversation(thread.conversationId)!;
-            const current = this.store.getThread(thread.id)!;
+            let current = this.store.getThread(thread.id)!;
             const finished = reply.status === "completed" || reply.status === "idle";
             if (finished) this.attempts.delete(thread.id);
             const attempt = finished ? 0 : this.attempt(current);
@@ -196,7 +204,12 @@ export class Worker {
               await this.giveUp(conversation, current, `it is ${reply.status}`);
               return;
             }
-            await this.locked(conversation.id, () => this.run(conversation, { type: "thread_finished", thread: current, reply, attempt }));
+            await this.locked(conversation.id, () => {
+              // A run that held the lock may have sent it newer work: this answer is then out of date.
+              current = this.store.getThread(thread.id)!;
+              const newerWork = current.awaitingSince !== null;
+              return this.run(conversation, { type: "thread_finished", thread: current, reply, attempt, ...(newerWork && { newerWork }) });
+            });
             // Done unless the brain sent it more work: settle it, so T3's active list holds what's live.
             // Threads t3c only attached to belong to whoever started them; they stay as they are.
             if (finished && current.origin === "started" && !this.store.getThread(thread.id)?.awaitingSince) await this.settle(current);

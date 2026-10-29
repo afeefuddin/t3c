@@ -245,6 +245,14 @@ export class Store {
     return (rows as Row[]).map((r) => toMessage(r)!);
   }
 
+  /** The conversation with the oldest pending incoming message, without taking anything. */
+  nextPending(): string | undefined {
+    const row = this.db.prepare("SELECT conversation_id FROM messages WHERE status = 'pending' ORDER BY created_at, rowid LIMIT 1").get() as
+      | { conversation_id: string }
+      | undefined;
+    return row?.conversation_id;
+  }
+
   /**
    * Takes every pending incoming message of one conversation (the given one, or the one with the
    * oldest pending message), marking them processing. Oldest first; empty when nothing is pending.
