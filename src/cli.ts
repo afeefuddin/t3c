@@ -6,7 +6,7 @@ import { CodexBrain } from "./agent/codex.ts";
 import { AgentToolServer } from "./agent/mcp.ts";
 import { overriddenSkills } from "./agent/skills.ts";
 import { isLoggedIn, t3Auth } from "./auth.ts";
-import { loadConfig, paths, saveConfig } from "./config.ts";
+import { loadConfig, paths, saveConfig, VERSION } from "./config.ts";
 import { type Brain, SimpleBrain } from "./brain.ts";
 import { describeGateways, logs, runningPid, start, status, stop } from "./daemon.ts";
 import { Dispatcher } from "./dispatch.ts";
@@ -16,6 +16,7 @@ import { httpGateway } from "./gateways/http.ts";
 import { SlackGateway } from "./gateways/slack.ts";
 import { color, errorMessage, log, preview } from "./log.ts";
 import { createApp } from "./server.ts";
+import { funnelProblem } from "./tailscale.ts";
 import { addGithub, addHttp, addSlack, applyChanges, chooseModel, githubToken, remove } from "./setup.ts";
 import { Store } from "./store.ts";
 import { RUNTIME_MODES, type RuntimeMode, T3Client } from "./t3.ts";
@@ -51,6 +52,7 @@ ${color("bold", "Other")}
   t3c projects                   list T3 projects
   t3c run "<prompt>" --project <p>   start a T3 thread right now
   t3c serve                      run in the foreground
+  t3c --version                  which t3c this is
 
 Config lives in ${paths.config}.`;
 
@@ -63,6 +65,7 @@ const { positionals, values } = parseArgs({
     follow: { type: "boolean", short: "f" },
     limit: { type: "string", short: "n" },
     help: { type: "boolean", short: "h" },
+    version: { type: "boolean", short: "v" },
   },
 });
 const [command, ...rest] = positionals;
@@ -70,7 +73,8 @@ const [command, ...rest] = positionals;
 const entry = process.argv[1];
 
 try {
-  switch (values.help ? undefined : command) {
+  if (values.version) console.log(VERSION);
+  else switch (values.help ? undefined : command) {
     case "setup":
       await setup();
       break;
@@ -199,6 +203,12 @@ async function login() {
 
 /** `t3c setup`: everything a first run needs, skipping what's already done, then starts t3c. */
 async function setup() {
+  const missing = await missingPrerequisites();
+  if (missing.length > 0) {
+    say.step("Before t3c can be set up");
+    for (const problem of missing) say.warn(problem);
+    throw new Error("Fix the above, then run `t3c setup` again.");
+  }
   if (isLoggedIn(paths.auth)) say.ok("Connected to T3 Code.");
   else await login();
   const config = loadConfig();
@@ -207,6 +217,24 @@ async function setup() {
     say.ok("Codex decides what to do with messages.");
   }
   await addSlack(); // ends by starting (or restarting) t3c
+}
+
+/** Everything setup needs that isn't there, all at once, so nothing stops it halfway. */
+async function missingPrerequisites(): Promise<string[]> {
+  const missing: string[] = [];
+  if (!isLoggedIn(paths.auth) && !commandExists("t3")) missing.push("The `t3` command (T3 Code's CLI) wasn't found. Install it and make sure T3 Code is running.");
+  const funnel = await funnelProblem();
+  if (funnel) missing.push(`Slack reaches this machine through Tailscale Funnel. ${funnel}`);
+  return missing;
+}
+
+function commandExists(command: string) {
+  try {
+    execFileSync(command, ["--version"], { stdio: "ignore" });
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
 }
 
 function codexReady() {
@@ -274,7 +302,9 @@ async function serve() {
   if (config.runtimeMode === "full-access") {
     log("t3c", "runtimeMode is full-access: chat messages can run any command on this machine", "warn");
   }
-  const t3 = await T3Client.connect(t3Auth());
+  // T3 Code may start after t3c or restart while it runs; the client connects whenever it's back.
+  const t3 = T3Client.lazy(t3Auth());
+  await t3.listProjects().catch((e) => log("t3c", `T3 Code isn't reachable yet (${errorMessage(e)}); t3c connects once it is`, "warn"));
   const agentTools = new AgentToolServer();
   const simple = new SimpleBrain();
   const brain: Brain = config.agent

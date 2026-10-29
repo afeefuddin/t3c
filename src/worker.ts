@@ -235,6 +235,8 @@ export class Worker {
     this.supervising = true;
     try {
       for (const thread of this.store.awaitingThreads()) {
+        // Resumes a wait that broke off, e.g. while T3 Code was restarting.
+        this.watch(thread);
         try {
           const { status, items } = await this.t3.progress(thread.t3ThreadId!);
           const seen = this.lastProgress.get(thread.id);

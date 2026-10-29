@@ -1,9 +1,22 @@
 {
   "name": "t3c",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Start T3 Code threads from Slack, GitHub and webhooks.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/afeefuddin/t3c.git"
+  },
+  "homepage": "https://github.com/afeefuddin/t3c#readme",
+  "bugs": "https://github.com/afeefuddin/t3c/issues",
+  "keywords": [
+    "t3code",
+    "slack",
+    "github",
+    "agents",
+    "codex"
+  ],
   "bin": {
     "t3c": "./dist/cli.js"
   },

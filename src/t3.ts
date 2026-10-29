@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { T3Auth } from "./auth.ts";
+import { VERSION } from "./config.ts";
 
 export interface Project {
   id: string;
@@ -93,33 +94,62 @@ interface ThreadState {
 
 type ToolCaller = Pick<Client, "callTool">;
 
+/** One connection to T3's MCP server. */
+export interface T3Session {
+  client: ToolCaller;
+  close(): Promise<void>;
+}
+
 /** Thread statuses that mean a run is still in progress. */
 export const WORKING = new Set(["preparing", "queued", "starting", "running"]);
 /** Stays under the MCP SDK's 60s default request timeout. */
 const WAIT_SLICE_MS = 45_000;
 const MAX_WAIT_MS = 2 * 60 * 60_000;
 
+/**
+ * T3's tools over MCP. The connection is opened on first use, and again after one fails: T3 Code
+ * may start after t3c, or restart (forgetting the session) while t3c runs.
+ */
 export class T3Client implements T3 {
-  private readonly client: ToolCaller;
-  private readonly onClose: () => Promise<void>;
+  private readonly open: () => Promise<T3Session>;
+  private session: Promise<T3Session> | undefined;
   /** T3's HTTP origin, where attachments are uploaded. */
   private readonly origin: string;
 
-  constructor(client: ToolCaller, onClose: () => Promise<void> = async () => {}, origin = "http://127.0.0.1:3773") {
-    this.client = client;
-    this.onClose = onClose;
+  constructor(open: () => Promise<T3Session>, origin = "http://127.0.0.1:3773") {
+    this.open = open;
     this.origin = origin;
   }
 
+  /** A client that connects when first used. */
+  static lazy(auth: T3Auth): T3Client {
+    return new T3Client(async () => {
+      const transport = new StreamableHTTPClientTransport(new URL(auth.serverUrl), { fetch: auth.fetch });
+      const client = new Client({ name: "t3c", version: VERSION });
+      await client.connect(transport);
+      return { client, close: () => transport.close() };
+    }, new URL(auth.serverUrl).origin);
+  }
+
+  /** A client that's connected already, so a CLI command fails right away when T3 isn't there. */
   static async connect(auth: T3Auth): Promise<T3Client> {
-    const transport = new StreamableHTTPClientTransport(new URL(auth.serverUrl), { fetch: auth.fetch });
-    const client = new Client({ name: "t3c", version: "0.1.0" });
-    await client.connect(transport);
-    return new T3Client(client, () => transport.close(), new URL(auth.serverUrl).origin);
+    const t3 = T3Client.lazy(auth);
+    await t3.connection();
+    return t3;
   }
 
   async close() {
-    await this.onClose();
+    const session = this.session;
+    this.session = undefined;
+    await (await session?.catch(() => undefined))?.close();
+  }
+
+  private connection(): Promise<T3Session> {
+    this.session ??= this.open().catch((error) => {
+      this.session = undefined;
+      throw error;
+    });
+    return this.session;
   }
 
   async listProjects() {
@@ -242,7 +272,19 @@ export class T3Client implements T3 {
   }
 
   private async call<T = unknown>(name: string, args: Record<string, unknown>): Promise<T> {
-    const result = await this.client.callTool({ name, arguments: args });
+    const connection = this.connection();
+    const session = await connection;
+    let result: Awaited<ReturnType<ToolCaller["callTool"]>>;
+    try {
+      result = await session.client.callTool({ name, arguments: args });
+    } catch (error) {
+      // The connection failed, not the tool: the next call opens a new one.
+      if (this.session === connection) {
+        this.session = undefined;
+        void session.close().catch(() => {});
+      }
+      throw error;
+    }
     const text = Array.isArray(result.content)
       ? result.content.map((part) => (part.type === "text" ? part.text : "")).join("")
       : "";

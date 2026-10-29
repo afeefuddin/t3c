@@ -10,14 +10,23 @@ Slack / GitHub ──HTTPS──▶ Tailscale Funnel ──▶ t3c (127.0.0.1) �
        └──────────────────────── answer ◀─────────────────────────────┘
 ```
 
+An independent project, not affiliated with T3 Code.
+
 ## Install
 
-Requires Node 24+, T3 Code running with its `t3` CLI, and [Tailscale](https://tailscale.com) (for Slack and
-GitHub).
+Requires:
+- macOS or Linux, with Node 24+
+- [T3 Code](https://github.com/pingdotgg/t3code) running, with its `t3` CLI
+- [Tailscale](https://tailscale.com) with [Funnel](https://tailscale.com/kb/1223/funnel) allowed (for Slack and GitHub)
+- for Slack: permission to add an app to your workspace; for GitHub: the [`gh` CLI](https://cli.github.com), logged in
+- optional: [Codex](https://github.com/openai/codex), logged in, for the AI agent
 
 ```sh
-npm install -g github:afeefuddin/t3c   # private repo: needs your GitHub access
+npm install -g t3c
 ```
+
+`t3c setup` checks all of this first and says what's missing. Linux works, but setup prints the
+links it would open on macOS.
 
 ## Set up
 
@@ -44,6 +53,12 @@ adds another repository.
 | `t3c stop` | stop t3c and turn Funnel off |
 | `t3c remove slack` / `github <owner/repo>` / `http` | disconnect |
 | `t3c add http` | an authenticated webhook for scripts and cron |
+| `t3c --version` | which t3c this is |
+
+Only want GitHub? Skip `setup`: run `t3c login`, then `t3c add github owner/repo`.
+
+t3c runs in the background, but doesn't start again by itself after a reboot: run `t3c start`.
+If T3 Code restarts, t3c reconnects on its own.
 
 Config is stored in `~/.t3c/config.json` (readable only by you).
 
@@ -143,3 +158,7 @@ npm test
 npm run typecheck
 npm run t3c -- status   # run from source
 ```
+
+## License
+
+[MIT](LICENSE)

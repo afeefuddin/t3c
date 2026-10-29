@@ -3,6 +3,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeMode, ThreadModel } from "./t3.ts";
 
+/** t3c's version, from package.json (one level up from both src/ and dist/). */
+export const VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+
 /** Everything t3c knows, in ~/.t3c/config.json (mode 0600: it holds tokens). Edited by `t3c add`/`remove`. */
 export interface Config {
   /** Local port t3c listens on (127.0.0.1 only). */

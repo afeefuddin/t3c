@@ -4,6 +4,11 @@ import { T3Client } from "../src/t3.ts";
 
 const SENT = "2026-01-01T00:00:05.000Z";
 
+/** Opens a session that answers tool calls with `callTool`. */
+function session(callTool: (call: { name: string; arguments?: any }) => Promise<unknown>) {
+  return async () => ({ client: { callTool } as never, close: async () => {} });
+}
+
 /** Answers MCP tool calls from a script of thread states, the way T3's server shapes them. */
 function fakeClient(statuses: string[], runCompletedAt = "2026-01-01T00:00:10.000Z", pendingRequestCount = 0) {
   const calls: string[] = [];
@@ -25,7 +30,7 @@ function fakeClient(statuses: string[], runCompletedAt = "2026-01-01T00:00:10.00
     }
     return { content: [{ type: "text", text: JSON.stringify(body) }] };
   };
-  return { client: new T3Client({ callTool } as never), calls };
+  return { client: new T3Client(session(callTool)), calls };
 }
 
 test("waitForReply waits while the thread works, then returns the latest run's last answer", async () => {
@@ -65,7 +70,7 @@ test("waitForReply ignores a run that finished before the message was sent", asy
     }
     return { content: [{ type: "text", text: JSON.stringify(body) }] };
   };
-  const client = new T3Client({ callTool } as never);
+  const client = new T3Client(session(callTool));
   assert.deepEqual(await client.waitForReply("t1", SENT), { status: "completed", text: "new" });
   assert.deepEqual(calls, ["t3_thread_read", "t3_thread_read", "t3_thread_wait", "t3_thread_read", "t3_thread_read"]);
 });
@@ -77,7 +82,7 @@ test("recentMessages reads the tail of the thread's messages", async () => {
     const items = Array.from({ length: 8 }, (_, i) => ({ type: i === 0 ? "user_message" : "assistant_message", runId: "r", text: `m${i}` }));
     return { content: [{ type: "text", text: JSON.stringify({ thread: { status: "running", latestRunId: "r", itemCount: 250 }, recentRuns: [], items }) }] };
   };
-  const result = await new T3Client({ callTool } as never).recentMessages("t1");
+  const result = await new T3Client(session(callTool)).recentMessages("t1");
   assert.equal(result.status, "running");
   assert.deepEqual(result.messages.map((m) => m.text), ["m2", "m3", "m4", "m5", "m6", "m7"]);
   assert.equal(calls[1].view, "messages");
@@ -103,7 +108,7 @@ test("attachments are uploaded to T3's signed URLs, then referenced by the launc
     return { content: [{ type: "text", text: JSON.stringify(body) }] };
   };
   try {
-    const client = new T3Client({ callTool } as never, async () => {}, origin);
+    const client = new T3Client(session(callTool), origin);
     const attachments = [
       { name: "shot.png", mimeType: "image/png", data: Buffer.from("png") },
       { name: "build.log", mimeType: "text/plain", data: Buffer.from("log!") },
@@ -120,4 +125,35 @@ test("attachments are uploaded to T3's signed URLs, then referenced by the launc
   } finally {
     server.close();
   }
+});
+
+test("a failed connection is replaced on the next call, e.g. after T3 Code restarts", async () => {
+  let opened = 0;
+  let closed = 0;
+  const client = new T3Client(async () => {
+    const id = ++opened;
+    return {
+      client: {
+        callTool: async () => {
+          if (id === 1) throw new Error("Session not found");
+          return { content: [{ type: "text", text: JSON.stringify({ projects: [{ id: "p", title: "web", workspaceRoot: "/" }] }) }] };
+        },
+      } as never,
+      close: async () => void closed++,
+    };
+  });
+  await assert.rejects(client.listProjects(), /Session not found/);
+  assert.equal((await client.listProjects())[0].title, "web");
+  assert.deepEqual([opened, closed], [2, 1]);
+});
+
+test("a tool's own error keeps the connection", async () => {
+  let opened = 0;
+  const client = new T3Client(async () => {
+    opened++;
+    return { client: { callTool: async () => ({ isError: true, content: [{ type: "text", text: "no such project" }] }) } as never, close: async () => {} };
+  });
+  await assert.rejects(client.listProjects(), /no such project/);
+  await assert.rejects(client.listProjects(), /no such project/);
+  assert.equal(opened, 1);
 });

@@ -23,6 +23,21 @@ export async function funnelBaseUrl(port = FUNNEL_PORT): Promise<string> {
   return port === 443 ? `https://${host}` : `https://${host}:${port}`;
 }
 
+/** Why Funnel can't work on this machine yet, if it can't: what setup checks before anything else. */
+export async function funnelProblem(): Promise<string | undefined> {
+  let status: { BackendState: string; Self?: { CapMap?: Record<string, unknown> } };
+  try {
+    status = JSON.parse(await tailscale("status", "--json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "Tailscale isn't installed: https://tailscale.com/download";
+    return `Tailscale isn't working: ${(error as { stderr?: string }).stderr?.trim() || error}`;
+  }
+  if (status.BackendState !== "Running") return `Tailscale is ${status.BackendState}: connect it (\`tailscale up\`).`;
+  const caps = status.Self?.CapMap ?? {};
+  if (!("https" in caps)) return "Turn on HTTPS certificates for your tailnet: https://login.tailscale.com/admin/dns";
+  if (!("funnel" in caps)) return "Allow Funnel for this machine in your tailnet's access controls: https://tailscale.com/kb/1223/funnel";
+}
+
 /** Publishes only /hooks on the Funnel port; /messages and /health stay local. */
 export async function enableFunnel(localPort: number, port = FUNNEL_PORT) {
   await tailscale("funnel", "--bg", "--yes", `--https=${port}`, "--set-path=/hooks", `http://127.0.0.1:${localPort}/hooks`);
