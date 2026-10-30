@@ -1,0 +1,44 @@
+{
+  "name": "t3c",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Start T3 Code threads from Slack, Instinct and webhooks.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/afeefuddin/t3c.git"
+  },
+  "homepage": "https://github.com/afeefuddin/t3c#readme",
+  "bugs": "https://github.com/afeefuddin/t3c/issues",
+  "keywords": [
+    "t3code",
+    "slack",
+    "instinct",
+    "agents",
+    "codex"
+  ],
+  "bin": {
+    "t3c": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node -e \"const fs = require('node:fs'); fs.rmSync('dist/agent/skills', { recursive: true, force: true }); fs.cpSync('src/agent/skills', 'dist/agent/skills', { recursive: true })\"",
+    "prepare": "npm run build",
+    "t3c": "node --disable-warning=ExperimentalWarning src/cli.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  },
+  "files": [
+    "dist"
+  ]
+}
