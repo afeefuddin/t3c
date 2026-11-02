@@ -16,7 +16,7 @@ const mode = process.env.FAKE_CODEX_MODE ?? "route";
 // Records the images it was given (between --image and --) and how the prompt names them.
 if (process.env.FAKE_CODEX_SEEN && !prompt.includes("<thread-answer>")) {
   const images = args.includes("--image") ? args.slice(args.indexOf("--image") + 1, args.indexOf("--")) : [];
-  const seen = { images: images.map((f) => readFileSync(f, "utf8")), prompt: /# Images\n.*/.exec(prompt)?.[0] };
+  const seen = { images: images.map((f) => readFileSync(f, "utf8")), prompt };
   writeFileSync(process.env.FAKE_CODEX_SEEN, JSON.stringify(seen));
 }
 

@@ -5,30 +5,31 @@ export const MIN_SECRET_LENGTH = 32;
 
 /**
  * Generic gateway for scripts and cron: callers POST JSON with `Authorization: Bearer <secret>`.
- * Body: { conversationId, project, title, prompt, worktree?: { baseRef, branch? }, idempotencyKey? }.
- * Results are read with GET /messages/<id>; there is no conversation to reply into.
+ * Body: { conversationId, prompt, project?, title?, worktree?, idempotencyKey? }.
+ * Replies are saved by ConversationTools and retrieved by the client.
  */
-export function httpGateway(secret: string, { projects, requireIdempotencyKey = false }: { projects?: string[]; requireIdempotencyKey?: boolean } = {}): Gateway {
+export function httpGateway(secret: string, { projects, requireIdempotencyKey = false, source = "http" }: { projects?: string[]; requireIdempotencyKey?: boolean; source?: string } = {}): Gateway {
   if (secret.length < MIN_SECRET_LENGTH) throw new Error(`T3C_SECRET must be at least ${MIN_SECRET_LENGTH} characters.`);
   return {
-    name: "http",
+    name: source,
     receive({ headers, body }) {
       if (!safeEqual(header(headers, "authorization"), `Bearer ${secret}`)) {
         throw new GatewayError(401, "Invalid or missing bearer secret.");
       }
       const input = parseObject(body);
-      const project = requireString(input, "project");
-      if (!httpProjectAllowed(project, projects)) throw new GatewayError(403, "Project is not allowed.");
+      const project = optionalString(input, "project");
+      if (project && !httpProjectAllowed(project, projects)) throw new GatewayError(403, "Project is not allowed.");
+      const prompt = requireString(input, "prompt");
       const worktree = input.worktree === undefined ? undefined : parseWorktree(input.worktree);
       return {
         message: {
-          source: "http",
+          source,
           eventKey: (requireIdempotencyKey ? requireString(input, "idempotencyKey") : optionalString(input, "idempotencyKey")) ?? randomUUID(),
           conversationId: requireString(input, "conversationId"),
-          user: "http",
-          text: requireString(input, "prompt"),
-          title: requireString(input, "title"),
-          projects: [project],
+          user: source,
+          text: prompt,
+          title: optionalString(input, "title") ?? prompt.slice(0, 80),
+          projects: project ? [project] : projects ?? ["*"],
           meta: worktree ? { worktree: JSON.stringify(worktree) } : undefined,
         },
       };
@@ -37,6 +38,8 @@ export function httpGateway(secret: string, { projects, requireIdempotencyKey = 
       if (!message.projects.every((p) => httpProjectAllowed(p, projects))) throw new GatewayError(403, "Project is not allowed.");
       return message.meta?.worktree ? { worktree: JSON.parse(message.meta.worktree) as Worktree } : {};
     },
+    // The common agent records replies in SQLite; clients read them over HTTP.
+    async reply() {},
   };
 }
 

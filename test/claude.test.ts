@@ -45,7 +45,8 @@ test("Claude routes through the shared scoped MCP tools and summarizes the threa
 });
 
 test("Claude restrictions, images and run-token revocation apply to every run", async () => {
-  const { gateway, worker, dir } = setup();
+  const { t3, gateway, worker, dir } = setup();
+  t3.threads.push({ threadId: "sibling", title: "Work from another conversation", status: "running", createdAt: "2026-10-31T10:00:00Z" });
   const seenFile = join(dir, "seen.json");
   process.env.FAKE_CLAUDE_SEEN = seenFile;
   try {
@@ -61,6 +62,9 @@ test("Claude restrictions, images and run-token revocation apply to every run", 
     assert.ok(seen.args.includes("--disable-slash-commands"));
     assert.ok(seen.args.includes("--no-session-persistence"));
     assert.deepEqual(seen.content[1], { type: "image", source: { type: "base64", media_type: "image/png", data: Buffer.from("png").toString("base64") } });
+    assert.match(seen.content[0].text, /# Current work/);
+    assert.match(seen.content[0].text, /Work from another conversation/);
+    assert.ok(t3.sends.every((s) => s.threadId !== "sibling"));
     const response = await fetch(toolsUrl, { method: "POST", headers: { authorization: `Bearer ${seen.token}` } });
     assert.equal(response.status, 401);
   } finally { delete process.env.FAKE_CLAUDE_SEEN; }

@@ -6,7 +6,11 @@ description: Answers questions about work that's going on or was done, here or a
 # Check on work
 
 1. About this conversation's own threads: `read_thread` by label.
-2. About anything else, or unsure: `list_threads` with a `search` word from the question ("fold",
+2. For earlier discussions or work from another interface, use `list_conversations` and
+   `read_conversation` when useful. Its threadIds let you read current progress or continue the
+   same work here, carrying forward relevant decisions. The conversation summary is historical;
+   use current thread state when you need an up-to-date status.
+   About anything else, or unsure: `list_threads` with a `search` word from the question ("fold",
    "login", "Safari"), which also finds finished work; try another word or two if nothing fits.
    For "what's running?" in general, `list_threads` without a search. Match by title and project,
    prefer the most recently active, then `inspect_thread` only the ones that match.

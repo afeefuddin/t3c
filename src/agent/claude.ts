@@ -5,7 +5,7 @@ import type { AgentEvent, Brain } from "../brain.ts";
 import { errorMessage, log } from "../log.ts";
 import type { Attachment } from "../t3.ts";
 import type { AgentToolServer } from "./mcp.ts";
-import { agentPrompt } from "./prompts.ts";
+import { prepareAgentPrompt } from "./prompts.ts";
 import { loadSkills } from "./skills.ts";
 import type { ConversationTools } from "./tools.ts";
 
@@ -47,9 +47,7 @@ export class ClaudeBrain implements Brain {
     try {
       this.capabilities ??= checkClaudeCli(this.options.claudeBin);
       await this.capabilities;
-      const source = event.type === "message" ? await tools.source().catch((error) => void log("agent", `couldn't fetch the source: ${errorMessage(error)}`, "warn")) : undefined;
-      const images = event.type === "message" ? await tools.images().catch((error) => (log("agent", `couldn't fetch images: ${errorMessage(error)}`, "warn"), [])) : [];
-      const prompt = agentPrompt(event, await tools.getConversation(), skills, source, images.map((i) => i.name));
+      const { prompt, images } = await prepareAgentPrompt(event, tools, skills);
       return await this.exec(prompt, token, images);
     } catch (error) {
       if (tools.acted) throw error;

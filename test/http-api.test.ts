@@ -74,10 +74,13 @@ test("Instinct can start a task, read the actual T3 answer, and follow up in the
   assert.equal(t3.launches.length, 1);
   assert.equal(t3.launches[0].projectId, "p1");
   const resultPath = `/hooks/http/messages/${messageId}`;
-  assert.deepEqual(await (await get(resultPath)).json(), {
+  const firstResult = await (await get(resultPath)).json();
+  assert.deepEqual(firstResult, {
     messageId, conversationId: task.conversationId, deliveryStatus: "done",
     threads: [{ threadId: "t1", status: "running", answer: "Working on the login bug" }],
+    replies: firstResult.replies, pending: false,
   });
+  assert.deepEqual(firstResult.replies.map((r: { text: string }) => r.text), ["On it! I'll post here when it's done 👀", "**Done** in t1"]);
   answer({ status: "completed", text: "Fixed the redirect and checked the regression." });
   const completed = await (await get(resultPath)).json();
   assert.equal(completed.threads[0].status, "completed");
@@ -92,11 +95,20 @@ test("Instinct can start a task, read the actual T3 answer, and follow up in the
   assert.equal((await (await get(`/hooks/http/messages/${followUpId}`)).json()).threads[0].status, "waiting");
 });
 
-test("structured HTTP tasks dispatch directly even when a chat AI brain is configured", async (t) => {
-  const { post, worker, t3 } = await setup(t, ["p1"], { name: "chat-ai", async handle() { throw new Error("HTTP must not call the chat AI"); } });
-  assert.equal((await post(task)).status, 202);
+test("HTTP chat uses the same configured brain, including questions that need no coding thread", async (t) => {
+  let calls = 0;
+  const { post, get, worker, t3 } = await setup(t, ["p1"], {
+    name: "shared-agent", async handle(_event, tools) { calls++; await tools.reply({ text: "The checkout fix is ready." }); return "answered"; },
+  });
+  const response = await post({ conversationId: "chat", prompt: "What happened to the checkout fix?", idempotencyKey: "question-1" });
+  assert.equal(response.status, 202);
+  const { messageId } = await response.json();
   await worker.idle();
-  assert.equal(t3.launches.length, 1);
+  assert.equal(calls, 1);
+  assert.equal(t3.launches.length, 0);
+  const result = await (await get(`/hooks/http/messages/${messageId}`)).json();
+  assert.equal(result.replies[0].text, "The checkout fix is ready.");
+  assert.equal(result.pending, false);
 });
 
 test("network retries recover the original message id without repeating work; conflicting keys are refused", async (t) => {
@@ -109,7 +121,7 @@ test("network retries recover the original message id without repeating work; co
   assert.equal((await post({ ...task, prompt: "Different work" })).status, 409);
   assert.equal((await post({ ...task, conversationId: "different" })).status, 409);
   assert.equal((await post({ ...task, worktree: { baseRef: "main" } })).status, 409);
-  assert.equal((await post({ ...task, project: "p2", idempotencyKey: "request-2" })).status, 409);
+  assert.equal((await post({ ...task, project: "p2" })).status, 409);
   await worker.idle();
   assert.equal(t3.launches.length, 1);
   assert.equal(t3.sends.length, 0);
@@ -140,7 +152,10 @@ test("results cannot reveal another gateway, an outbound message, revoked projec
   }
   const response = await get(`/hooks/http/messages/${allowed.id}`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { messageId: allowed.id, conversationId: "allowed", deliveryStatus: "pending", threads: [] });
+  const result = await response.json();
+  assert.deepEqual(result, { messageId: allowed.id, conversationId: "allowed", deliveryStatus: "pending", threads: [], pending: true,
+    replies: [{ id: outbound.id, text: "private internal message", at: outbound.createdAt }] });
+  assert.doesNotMatch(JSON.stringify(result), /private agent summary|private internal run/);
 });
 
 test("all historical project permissions are checked, beyond the recent message window", async (t) => {
@@ -151,7 +166,7 @@ test("all historical project permissions are checked, beyond the recent message 
     latest = store.enqueue(message({ source: "http", eventKey: `history-${n}`, conversationId: "mixed", projects: ["p1"] }))!;
   }
   assert.equal((await get(`/hooks/http/messages/${latest!.id}`)).status, 404);
-  assert.equal((await post({ ...task, conversationId: "mixed" })).status, 409);
+  assert.equal((await post({ ...task, conversationId: "mixed" })).status, 403);
 });
 
 test("delivery failures are distinct from completion and don't expose internal exceptions", async (t) => {
@@ -197,5 +212,5 @@ test("the private handoff is a complete prompt with credentials, actions, retry 
   assert.match(handoff, /Do not start any coding work as a setup test/);
   assert.match(handoff, /If you cannot make authenticated HTTP requests/);
   assert.match(handoff, /reuse the exact JSON body and idempotencyKey/);
-  assert.match(handoff, /deliveryStatus=done means the message reached T3, not that coding finished/);
+  assert.match(handoff, /deliveryStatus=done means the agent handled the message, not necessarily that coding finished/);
 });

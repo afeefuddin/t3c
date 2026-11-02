@@ -23,6 +23,7 @@ import { Store } from "./store.ts";
 import { RUNTIME_MODES, type RuntimeMode, T3Client } from "./t3.ts";
 import { confirm, say } from "./ui.ts";
 import { Worker } from "./worker.ts";
+import { chatToken, terminalChat } from "./terminal.ts";
 
 /** How often followed conversations are checked for messages that never arrived as webhooks. */
 const CATCH_UP_INTERVAL_MS = 20_000;
@@ -45,6 +46,8 @@ ${color("bold", "Set up")}
   t3c agent off                  back to fixed rules
 
 ${color("bold", "Run")}
+  t3c                           chat with the agent (continues your terminal conversation)
+  t3c chat                      open terminal chat explicitly
   t3c start | stop | restart     the background service
   t3c status                     what's running and connected
   t3c logs [-f]                  what it's doing
@@ -76,6 +79,12 @@ try {
   const entry = process.argv[1];
 
   if (values.version) console.log(VERSION);
+  else if (!values.help && (command === "chat" || (!command && process.stdin.isTTY))) {
+    if (!loadConfig().agent) throw new Error("Choose the agent first: `t3c agent codex` or `t3c agent claude`.");
+    if (!runningPid()) await start(entry);
+    if (!runningPid()) throw new Error("t3c didn't start. Check `t3c logs`.");
+    await terminalChat();
+  }
   else switch (values.help ? undefined : command) {
     case "setup":
       await setup();
@@ -296,7 +305,8 @@ async function serve() {
   if (!isLoggedIn(paths.auth)) throw new Error("Not connected to T3 Code. Run `t3c login` first.");
   const store = new Store(paths.state);
 
-  const gateways: Gateway[] = [];
+  const localChatToken = chatToken();
+  const gateways: Gateway[] = [httpGateway(localChatToken, { source: "cli", projects: ["*"], requireIdempotencyKey: true })];
   if (config.http) gateways.push(httpGateway(config.http.secret, {
     projects: config.http.projects ?? (config.http.public ? [] : undefined),
     requireIdempotencyKey: config.http.public,
@@ -347,7 +357,7 @@ async function serve() {
         publicUrl: config.http.publicUrl ?? await funnelBaseUrl(),
       })
     : undefined;
-  const server = createApp({ gateways, worker, store, secret: config.http?.secret, agentTools, httpApi });
+  const server = createApp({ gateways, worker, store, secret: config.http?.secret, agentTools, httpApi, chatSecret: localChatToken });
   server.listen(config.port, "127.0.0.1", () => {
     log("t3c", `listening on 127.0.0.1:${config.port}; threads run as ${config.runtimeMode}; brain: ${brain.name}`, "ok");
     for (const line of describeGateways(config)) log("t3c", line);

@@ -101,6 +101,46 @@ test("list_threads with a search finds finished threads by title too", async () 
   assert.equal((await run.inspectThread({ threadId: "f1" })).status, "running");
 });
 
+test("current work is fresh across conversations, scoped to allowed projects, and inspectable", async () => {
+  const { t3, store, tools } = setup(["demo"]);
+  const other = store.enqueue(message({ conversationId: "other", eventKey: "other", text: "private request" }))!;
+  store.updateConversation(other.conversationId, { summary: "private notes" });
+  const calls: unknown[] = [];
+  let title = "Fix checkout";
+  t3.listThreads = async (projectId, filter) => {
+    calls.push([projectId, filter]);
+    return [{ threadId: "sibling", title, status: "running", createdAt: "2026-10-31T10:00:00Z" }];
+  };
+
+  const run = tools();
+  const first = await run.currentWork();
+  assert.equal(first.threads?.[0].title, "Fix checkout");
+  assert.deepEqual(calls, [["p1", { settled: false }]]);
+  assert.doesNotMatch(JSON.stringify(first), /private request|private notes|other/);
+  assert.equal((await run.inspectThread({ threadId: "sibling" })).status, "running");
+  assert.deepEqual(t3.sends, []);
+  title = "Checkout ready for review";
+  assert.equal((await tools().currentWork()).threads?.[0].title, title);
+  assert.equal(first.threads?.[0].title, "Fix checkout");
+});
+
+test("current work is bounded and marks failures as unknown rather than no work", async () => {
+  const { t3, tools } = setup();
+  t3.listThreads = async () => Array.from({ length: 45 }, (_, i) => ({
+    threadId: `thread-${i}`, title: `Task ${i}`, status: "running",
+    createdAt: `2026-10-31T10:00:${String(i).padStart(2, "0")}Z`,
+  }));
+  const snapshot = await tools().currentWork();
+  assert.equal(snapshot.threads?.length, 40);
+  assert.equal(snapshot.threads?.[0].threadId, "thread-44");
+  assert.equal(snapshot.truncated, true);
+
+  t3.listThreads = async () => { throw new Error("T3 unavailable"); };
+  const unavailable = await tools().currentWork();
+  assert.equal(unavailable.unavailable, true);
+  assert.equal(unavailable.threads, undefined);
+});
+
 test("send_to_thread messages a thread from list_threads directly and attaches it, once", async () => {
   const { t3, store, conversation, tools } = setup(["demo"]);
   t3.listThreads = async () => [{ threadId: "ui1", title: "Fix Live Chat Reply UI", status: "completed", settled: true, createdAt: "2026-10-27T10:00:00Z" }];
@@ -177,7 +217,7 @@ test("replies longer than a chat message are rejected with a hint to rewrite", a
 });
 
 test("the fixed rules post a thread's answer cut to fit, at a sentence end", () => {
-  const long = `${"The PR is merged and deployed to production. ".repeat(12)}Details follow.`;
+  const long = `${"The PR is merged and deployed to production. ".repeat(Math.ceil(LIMITS.replyChars / 40) + 2)}Details follow.`;
   const short = describeReply({ status: "completed", text: long });
   assert.ok(short.length <= LIMITS.replyChars);
   assert.match(short, /production\. \(more in T3 Code\)$/);

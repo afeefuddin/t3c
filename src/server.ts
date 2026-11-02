@@ -19,6 +19,8 @@ export interface ServerDeps {
   agentTools?: AgentToolServer;
   /** Opt-in remote API for HTTP callers such as Instinct. */
   httpApi?: HttpApi;
+  /** Local terminal chat, served outside /hooks so Funnel never publishes it. */
+  chatSecret?: string;
 }
 
 /**
@@ -40,13 +42,37 @@ export function slackChallengeServer() {
   });
 }
 
-export function createApp({ gateways, worker, store, secret, agentTools, httpApi }: ServerDeps) {
+export function createApp({ gateways, worker, store, secret, agentTools, httpApi, chatSecret }: ServerDeps) {
   const byName = new Map(gateways.map((g) => [g.name, g]));
 
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", "http://localhost");
       const [, root, name, extra] = url.pathname.split("/");
+
+      if (root === "chat" && chatSecret) {
+        if (!safeEqual(header(req.headers, "authorization"), `Bearer ${chatSecret}`)) return send(res, 401, { error: "Unauthorized." });
+        if (req.method === "POST" && url.pathname === "/chat") {
+          const gateway = byName.get("cli");
+          if (!gateway) return send(res, 404, { error: "Terminal chat is unavailable." });
+          const { message } = await gateway.receive({ headers: req.headers, body: await readBody(req) });
+          if (!message) throw new GatewayError(400, "A chat message is required.");
+          const previous = store.findDelivery("cli", message.eventKey);
+          if (previous && JSON.stringify(previous.inbound) !== JSON.stringify(message)) throw new GatewayError(409, "Idempotency key was already used for a different request.");
+          const record = previous ?? worker.enqueue(message);
+          return send(res, 202, { accepted: true, messageId: record!.id, ...(previous && { duplicate: true }) });
+        }
+        if (req.method === "GET" && name && extra === undefined) {
+          const conversation = store.findConversation("cli", decodeURIComponent(name));
+          const messages = conversation ? store.messages(conversation.id, 100) : [];
+          const activity = conversation ? store.conversationActivity(conversation.id) : null;
+          return send(res, 200, {
+            messages: messages.map(({ id, direction, text, status, createdAt }) => ({ id, direction, text, status, at: createdAt })),
+            pending: activity !== null, activity,
+          });
+        }
+        return send(res, 404, { error: "Not found." });
+      }
 
       if (httpApi && req.method === "GET" && root === "hooks" && name === "http") {
         if (url.pathname === "/hooks/http") return send(res, 200, httpDiscovery(httpApi.publicUrl));
@@ -65,7 +91,8 @@ export function createApp({ gateways, worker, store, secret, agentTools, httpApi
           log("slack", "✓ answered Slack's URL check");
           return send(res, 200, { challenge });
         }
-        const gateway = byName.get(name);
+        // Local terminal credentials must never be accepted under the public /hooks path.
+        const gateway = name === "cli" ? undefined : byName.get(name);
         if (!gateway) return send(res, 404, { error: "Not found." });
         const { response, message } = await gateway.receive({ headers: req.headers, body });
         if (!message) return send(res, 200, response ?? { ok: true });

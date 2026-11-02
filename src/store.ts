@@ -177,6 +177,18 @@ export class Store {
     return toConversation(row as Row);
   }
 
+  /** Shared conversation directory. Callers enforce project access before returning records. */
+  searchConversations(search = "", limit = 200): Conversation[] {
+    const rows = this.db.prepare(`
+      SELECT c.* FROM conversations c WHERE ? = ''
+        OR instr(lower(coalesce(c.summary, '')), lower(?)) > 0
+        OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND instr(lower(m.text), lower(?)) > 0)
+        OR EXISTS (SELECT 1 FROM threads t WHERE t.conversation_id = c.id AND instr(lower(t.title), lower(?)) > 0)
+      ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?
+    `).all(search, search, search, search, limit) as Row[];
+    return rows.map((r) => toConversation(r)!);
+  }
+
   updateConversation(id: string, changes: { state?: ConversationState; summary?: string }) {
     const current = this.getConversation(id);
     if (!current) return;
@@ -294,6 +306,28 @@ export class Store {
   /** After a crash, messages left mid-processing go back to pending. */
   requeueInterrupted() {
     this.db.prepare("UPDATE messages SET status = 'pending' WHERE status = 'processing'").run();
+    this.db.prepare("UPDATE agent_runs SET status = 'failed', error = 'Interrupted by restart', finished_at = ? WHERE status = 'running'").run(now());
+  }
+
+  conversationBusy(conversationId: string): boolean {
+    return Boolean(this.db.prepare(`
+      SELECT 1 WHERE EXISTS (SELECT 1 FROM messages WHERE conversation_id = ? AND status IN ('pending', 'processing'))
+        OR EXISTS (SELECT 1 FROM threads WHERE conversation_id = ? AND awaiting_since IS NOT NULL)
+        OR EXISTS (SELECT 1 FROM agent_runs WHERE conversation_id = ? AND status = 'running')
+    `).get(conversationId, conversationId, conversationId));
+  }
+
+  /** Transport-visible activity, without exposing agent prompts, tool results or logs. */
+  conversationActivity(conversationId: string): { phase: "queued" | "thinking" | "working"; since: string; title?: string } | null {
+    const run = this.db.prepare("SELECT started_at FROM agent_runs WHERE conversation_id = ? AND status = 'running' ORDER BY started_at LIMIT 1")
+      .get(conversationId) as { started_at: string } | undefined;
+    if (run) return { phase: "thinking", since: run.started_at };
+    const message = this.db.prepare("SELECT status, created_at FROM messages WHERE conversation_id = ? AND status IN ('pending', 'processing') ORDER BY created_at LIMIT 1")
+      .get(conversationId) as { status: string; created_at: string } | undefined;
+    if (message) return { phase: message.status === "pending" ? "queued" : "thinking", since: message.created_at };
+    const thread = this.db.prepare("SELECT title, awaiting_since FROM threads WHERE conversation_id = ? AND awaiting_since IS NOT NULL ORDER BY awaiting_since LIMIT 1")
+      .get(conversationId) as { title: string; awaiting_since: string } | undefined;
+    return thread ? { phase: "working", since: thread.awaiting_since, title: thread.title } : null;
   }
 
   // ── threads ────────────────────────────────────────────────────────────────
@@ -371,6 +405,12 @@ export class Store {
   /** Marks that a message was just sent to the thread and its answer is owed to the conversation. */
   setAwaiting(id: string, since: string) {
     this.db.prepare("UPDATE threads SET awaiting_since = ?, updated_at = ? WHERE id = ?").run(since, now(), id);
+  }
+
+  /** A continuation takes its answer to the interface now being used, without broadcasting. */
+  moveAnswerTo(t3ThreadId: string, conversationId: string) {
+    this.db.prepare("UPDATE threads SET awaiting_since = NULL WHERE t3_thread_id = ? AND conversation_id != ?")
+      .run(t3ThreadId, conversationId);
   }
 
   /** Clears the owed answer unless a newer message arrived meanwhile. Returns whether it cleared. */

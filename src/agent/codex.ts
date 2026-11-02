@@ -8,7 +8,7 @@ import { errorMessage, log } from "../log.ts";
 import type { Attachment } from "../t3.ts";
 import type { ConversationTools } from "./tools.ts";
 import type { AgentToolServer } from "./mcp.ts";
-import { agentPrompt } from "./prompts.ts";
+import { prepareAgentPrompt } from "./prompts.ts";
 import { loadSkills } from "./skills.ts";
 
 export interface CodexOptions {
@@ -65,11 +65,7 @@ export class CodexBrain implements Brain {
     const skills = loadSkills(this.options.skillsDir);
     const token = this.options.toolServer.open(tools, skills);
     try {
-      // Without the source the run still works; start_thread reports the same error if it matters.
-      const source = event.type === "message" ? await tools.source().catch((error) => void log("agent", `couldn't fetch the source: ${errorMessage(error)}`, "warn")) : undefined;
-      // The screenshots people share, so the run sees what they're pointing at.
-      const images = event.type === "message" ? await tools.images().catch((error) => (log("agent", `couldn't fetch images: ${errorMessage(error)}`, "warn"), [])) : [];
-      const prompt = agentPrompt(event, await tools.getConversation(), skills, source, images.map((i) => i.name));
+      const { prompt, images } = await prepareAgentPrompt(event, tools, skills);
       this.lockdown ??= lockdownArgs(this.options.codexBin ?? "codex");
       return await this.exec(prompt, token, await this.lockdown, images);
     } catch (error) {

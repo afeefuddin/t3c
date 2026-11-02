@@ -29,13 +29,13 @@ export class HttpApi {
       .map(({ id, title }) => ({ id, title }));
   }
 
-  /** Validate before enqueueing: retries must be identical, and follow-ups stay in the same project. */
+  /** Validate before enqueueing: retries must be identical and the conversation must remain accessible. */
   existingDelivery(message: InboundMessage): StoredMessage | undefined {
     const { store, projects } = this.deps;
     if (!message.projects.every((p) => httpProjectAllowed(p, projects))) throw new GatewayError(403, "Project is not allowed.");
     const conversation = store.findConversation("http", message.conversationId);
-    if (conversation && store.conversationProjects(conversation.id).some((p) => !message.projects.includes(p))) {
-      throw new GatewayError(409, "Use a new conversationId for a different project.");
+    if (conversation && !store.conversationProjects(conversation.id).every((p) => httpProjectAllowed(p, projects))) {
+      throw new GatewayError(403, "Conversation is not allowed.");
     }
     const previous = store.findDelivery("http", message.eventKey);
     if (!previous) return;
@@ -77,6 +77,8 @@ export class HttpApi {
       deliveryStatus: message.status,
       ...(message.status === "failed" && { error: "Could not deliver the task. Check t3c logs on the host." }),
       threads,
+      replies: store.messages(conversation.id, 100).filter((m) => m.direction === "out").map((m) => ({ id: m.id, text: m.text, at: m.createdAt })),
+      pending: store.conversationBusy(conversation.id),
     };
   }
 }
@@ -90,7 +92,7 @@ export function httpOpenApi(baseUrl = "/") {
   })]));
   return {
     openapi: "3.0.3",
-    info: { title: "t3c agent API", version: VERSION, description: "Start T3 Code tasks, send follow-ups, and retrieve answers. Use only when the user asks for coding work." },
+    info: { title: "t3c agent API", version: VERSION, description: "Chat with the shared T3C agent: ask about previous work, give follow-ups, or start coding tasks." },
     servers: [{ url: baseUrl }],
     security: [{ bearerAuth: [] }],
     components: { securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } } },
@@ -106,14 +108,14 @@ export function httpOpenApi(baseUrl = "/") {
       "/hooks/http": {
         post: {
           operationId: "sendTask", summary: "Start a task or send a follow-up",
-          description: "Keep conversationId and project unchanged for follow-ups. Use a new idempotencyKey for each new message; reuse the same key and exact body for network retries. A 202 only means accepted, not finished.",
+          description: "Keep conversationId for chat continuity. Project and title are optional; omit project to let the shared agent choose among allowed projects. A conversation may cover several tasks. Use a new idempotencyKey per message and retain the exact body for network retries. A 202 means accepted, not finished.",
           requestBody: { required: true, content: { "application/json": { schema: {
-            type: "object", required: ["conversationId", "project", "title", "prompt", "idempotencyKey"],
+            type: "object", required: ["conversationId", "prompt", "idempotencyKey"],
             properties: {
-              conversationId: { ...string, description: "Stable id for one coding conversation. Use a new id for unrelated work." },
-              project: { ...string, description: "An exact project id from listProjects." },
+              conversationId: { ...string, description: "Stable id for this chat. The agent can find and continue work from other conversations." },
+              project: { ...string, description: "Optional project hint/restriction: an exact id from listProjects." },
               title: { ...string, description: "Short task title." },
-              prompt: { ...string, description: "Self-contained task, or the follow-up message." },
+              prompt: { ...string, description: "Your message to the shared agent: a question, task or follow-up." },
               idempotencyKey: { ...string, description: "Unique per message; retain it when retrying." },
               worktree: { type: "object", required: ["baseRef"], properties: { baseRef: string, branch: string }, description: "Only for a new conversation when the user requested a separate worktree." },
             },
@@ -128,12 +130,14 @@ export function httpOpenApi(baseUrl = "/") {
       "/hooks/http/messages/{messageId}": {
         get: {
           operationId: "getTaskResult", summary: "Read delivery state and the latest T3 answer",
-          description: "deliveryStatus=done means forwarded to T3, not task completion. Wait for deliveryStatus=done and thread status completed or idle before presenting its answer as final. Other thread states (including waiting, failed, cancelled, interrupted) need attention. A follow-up shares the conversation's threads, so results show their latest run, not a historical snapshot. If the host is unreachable, the task may still be pending; do not submit a new message to check status.",
+          description: "Read the agent's replies, deduplicating by reply id. pending indicates that chat or coding work is still in progress. deliveryStatus=done means the agent handled the message, not necessarily that coding finished. Thread states and answers show their latest run, not a historical snapshot. Do not submit a new message just to check status.",
           parameters: [{ name: "messageId", in: "path", required: true, schema: string }],
           responses: { "200": response("Latest task state and answers, without internal logs.", {
             type: "object", required: ["messageId", "conversationId", "deliveryStatus", "threads"], properties: {
               messageId: string, conversationId: string,
               deliveryStatus: { type: "string", enum: ["pending", "processing", "done", "failed"] }, error: { type: "string" },
+              pending: { type: "boolean" },
+              replies: { type: "array", items: { type: "object", properties: { id: string, text: string, at: string } } },
               threads: { type: "array", items: { type: "object", required: ["threadId", "status", "answer"], properties: {
                 threadId: { type: "string", nullable: true }, status: { type: "string" }, answer: { type: "string", nullable: true },
               } } },
@@ -147,7 +151,7 @@ export function httpOpenApi(baseUrl = "/") {
 
 /** Complete private handoff: deliberately contains the connection credential, never served publicly. */
 export function instinctInstructions(baseUrl: string, secret: string): string {
-  return `Connect to my T3 Code coding agents through t3c. Remember this connection and use it whenever I ask you to work on my code.
+  return `Connect to my shared T3C agent. It orchestrates T3 Code and remembers conversations across Slack, terminal and this connection. Pass my requests to this same agent, including questions about past work; it decides which coding threads to use.
 
 Connection name: t3c
 API origin: ${baseUrl}
@@ -165,13 +169,13 @@ Returns the projects I allowed you to use: [{"id":"...","title":"..."}]. Use the
 
 2. sendTask: POST ${baseUrl}/hooks/http
 Headers: Authorization as above and Content-Type: application/json.
-Body fields: conversationId (a stable id you generate for this coding conversation), project (an id from listProjects), title (short task title), prompt (a self-contained coding request), idempotencyKey (a unique id you generate for this message).
-The response is HTTP 202 with {"accepted":true,"messageId":"..."}. Save messageId, conversationId, project and the exact request body.
-For follow-ups, keep conversationId and project, and generate a new idempotencyKey. Use a new conversationId for unrelated work or another project. For a network retry, reuse the exact JSON body and idempotencyKey; the server returns the original messageId without repeating work. Do not automatically retry a 400, 401, 403 or 409 error.
+Body fields: conversationId (a stable id you generate for our chat), prompt (my message), idempotencyKey (a unique id you generate for this message). project (an id from listProjects) and title are optional; omit project when the agent should choose or summarize work across allowed projects.
+The response is HTTP 202 with {"accepted":true,"messageId":"..."}. Save messageId, conversationId and the exact request body.
+For follow-ups, keep conversationId and generate a new idempotencyKey. You can ask about Slack or terminal work in this chat; the shared agent finds its history and replies here. Use a new conversationId only to start a fresh chat. For a network retry, reuse the exact JSON body and idempotencyKey; the server returns the original messageId without repeating work. Do not automatically retry a 400, 401, 403 or 409 error.
 
 3. getTaskResult: GET ${baseUrl}/hooks/http/messages/{messageId}
 Replace {messageId} with the saved id. Returns {"messageId":"...","conversationId":"...","deliveryStatus":"pending|processing|done|failed","threads":[{"threadId":"...","status":"...","answer":"..."}]}.
-deliveryStatus=done means the message reached T3, not that coding finished. Present an answer as final only after deliveryStatus=done and all returned threads have status completed or idle. Report waiting, failed, cancelled or interrupted states accurately. Results show the latest run in the conversation, including follow-ups.
+Results also include replies [{id,text,at}] from the shared agent and pending (whether work is still in progress). Show new replies once, tracking their ids. deliveryStatus=done means the agent handled the message, not necessarily that coding finished. pending=false means no work is currently owed here. Report waiting, failed, cancelled or interrupted thread states accurately; results show the latest run, including follow-ups. A question can have replies without creating any coding thread.
 Check no more often than every 10 seconds while I am waiting. If the host is offline, treat silence as pending; never invent completion or submit a new task just to check status.
 
 Only request a worktree when I ask for one: add "worktree":{"baseRef":"main"} to the first message, using the correct base branch for that project.

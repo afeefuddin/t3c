@@ -31,9 +31,6 @@ export async function start(entry: string) {
   }
   const config = loadConfig();
   if (!isLoggedIn(paths.auth)) throw new Error("t3c isn't connected to T3 Code yet. Run `t3c login` first.");
-  if (!config.slack && !config.http) {
-    throw new Error("Nothing to run yet. Add a gateway first: `t3c add slack`, `t3c add http` or `t3c add instinct`.");
-  }
 
   say.step("Starting t3c");
   mkdirSync(home, { recursive: true, mode: 0o700 });

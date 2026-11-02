@@ -1,4 +1,4 @@
-import { SimpleBrain, type AgentEvent, type Brain } from "./brain.ts";
+import type { AgentEvent, Brain } from "./brain.ts";
 import type { Dispatcher } from "./dispatch.ts";
 import type { Gateway, InboundMessage } from "./gateway.ts";
 import { errorMessage, log, preview } from "./log.ts";
@@ -14,8 +14,6 @@ const MAX_ATTEMPTS = 3;
 const QUIET_MS = 4_000;
 /** …or after this long, if they keep typing. */
 const MAX_QUIET_WAIT_MS = 20_000;
-/** HTTP callers already supply a project and task; they read the answer rather than receiving chat replies. */
-const HTTP_BRAIN = new SimpleBrain();
 
 /**
  * Wakes the brain on events and keeps everything durable:
@@ -159,7 +157,7 @@ export class Worker {
     const requestFiles = event.type === "message" ? event.messages.flatMap((m) => m.inbound?.files ?? []) : [];
     const tools = new ConversationTools({ store: this.store, dispatcher: this.dispatcher, t3: this.t3, gateway, conversation, requestFiles });
     const run = this.store.startRun(conversation.id, event.type);
-    const brain = conversation.source === "http" ? HTTP_BRAIN : this.brain;
+    const brain = this.brain;
     try {
       const outcome = await brain.handle(event, tools);
       this.store.finishRun(run.id, { actions: tools.actions, outcome });

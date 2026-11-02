@@ -50,19 +50,38 @@ The prompt contains your API token, so keep it private. Instinct must support
 HTTP requests with a bearer token. Have it list the allowed projects to confirm
 the connection before sending a coding task.
 
-## Optional Slack routing agent
+## One agent across Slack, terminal and Instinct
 
 To let Codex or Claude choose projects and handle follow-ups, install and log in to
 its CLI, then run `t3c agent codex` or `t3c agent claude`.
 Use `t3c agent off` to disable routing.
 
+Run `t3c` to open a persistent terminal chat with that same agent. Ask what happened to work
+you started in Slack, continue it from your computer, or start something new. Replies return
+to the interface you're currently using. `/new` starts a fresh terminal chat; `/exit` leaves
+the chat while work continues in the background. The terminal reconnects to the same daemon.
+The terminal shows a scrollable conversation and live activity with elapsed time. Enter sends;
+Alt+Enter inserts a newline. `/help` lists the controls. If a send is unconfirmed, `/retry` reuses
+its delivery key without duplicating work.
+
+Each routing run sees active work across its allowed projects, including threads started from
+other conversations or in T3 Code. It can check an existing thread's progress and continue related
+work instead of starting a duplicate. It can search and read earlier conversations across interfaces,
+within the projects the current connection is allowed to use.
+One conversation can have several coding threads; the router uses the chat history and saved notes
+to interpret follow-ups and continue the relevant work.
+Messages, summaries and thread mappings are saved in `~/.t3c/state.sqlite` (or `$T3C_HOME`).
+Each agent run receives the conversation's notes and latest 30 messages; older conversations are
+found through text search. This is stored history and retrieval, not one permanently running model session.
+
 Without an agent, use `in:<project>` in Slack when several projects are allowed.
-Instinct and HTTP tasks specify their project directly.
+Instinct and HTTP use the same agent; a project can be specified or left for the agent to choose.
 
 ## Everyday commands
 
 | Command | Purpose |
 |---|---|
+| `t3c` / `t3c chat` | Talk to the shared agent |
 | `t3c status` | Check connections and public access |
 | `t3c start` / `t3c stop` | Start or stop the background service |
 | `t3c restart` | Apply configuration changes |
