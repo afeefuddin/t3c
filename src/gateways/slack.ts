@@ -113,6 +113,8 @@ export function slackApi(token: string): SlackCall {
 export class SlackGateway implements Gateway {
   readonly name = "slack";
   private readonly config: SlackConfig;
+  /** Read for each message, so `t3c projects slack` applies without a restart. */
+  private readonly projects: () => string[];
   private readonly store: Store;
   private readonly slack: SlackCall;
   private botUserId = "";
@@ -121,8 +123,9 @@ export class SlackGateway implements Gateway {
   private readonly names = new Map<string, Promise<string>>();
   private channels?: { ids: string[]; at: number };
 
-  constructor(config: SlackConfig, deps: { store: Store; slack?: SlackCall }) {
+  constructor(config: SlackConfig, deps: { store: Store; slack?: SlackCall; projects?: () => string[] }) {
     this.config = config;
+    this.projects = deps.projects ?? (() => config.projects);
     this.store = deps.store;
     this.slack = deps.slack ?? slackApi(config.botToken);
   }
@@ -299,7 +302,7 @@ export class SlackGateway implements Gateway {
       user: `<@${event.user}>`,
       text,
       title: firstLine(text),
-      projects: this.config.projects,
+      projects: this.projects(),
       meta: { channel: event.channel, ts: event.ts, ...(event.thread_ts ? { threadTs: event.thread_ts } : {}) },
       ...(files.length > 0 && { files }),
     };

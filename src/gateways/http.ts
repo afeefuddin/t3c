@@ -8,8 +8,12 @@ export const MIN_SECRET_LENGTH = 32;
  * Body: { conversationId, prompt, project?, title?, worktree?, idempotencyKey? }.
  * Replies are saved by ConversationTools and retrieved by the client.
  */
-export function httpGateway(secret: string, { projects, requireIdempotencyKey = false, source = "http" }: { projects?: string[]; requireIdempotencyKey?: boolean; source?: string } = {}): Gateway {
+export function httpGateway(
+  secret: string,
+  { projects, requireIdempotencyKey = false, source = "http" }: { projects?: Allowed; requireIdempotencyKey?: boolean; source?: string } = {},
+): Gateway {
   if (secret.length < MIN_SECRET_LENGTH) throw new Error(`T3C_SECRET must be at least ${MIN_SECRET_LENGTH} characters.`);
+  const allowed = typeof projects === "function" ? projects : () => projects;
   return {
     name: source,
     receive({ headers, body }) {
@@ -18,7 +22,7 @@ export function httpGateway(secret: string, { projects, requireIdempotencyKey = 
       }
       const input = parseObject(body);
       const project = optionalString(input, "project");
-      if (project && !httpProjectAllowed(project, projects)) throw new GatewayError(403, "Project is not allowed.");
+      if (project && !httpProjectAllowed(project, allowed())) throw new GatewayError(403, "Project is not allowed.");
       const prompt = requireString(input, "prompt");
       const worktree = input.worktree === undefined ? undefined : parseWorktree(input.worktree);
       return {
@@ -29,19 +33,22 @@ export function httpGateway(secret: string, { projects, requireIdempotencyKey = 
           user: source,
           text: prompt,
           title: optionalString(input, "title") ?? prompt.slice(0, 80),
-          projects: project ? [project] : projects ?? ["*"],
+          projects: project ? [project] : allowed() ?? ["*"],
           meta: worktree ? { worktree: JSON.stringify(worktree) } : undefined,
         },
       };
     },
     async prepare(message) {
-      if (!message.projects.every((p) => httpProjectAllowed(p, projects))) throw new GatewayError(403, "Project is not allowed.");
+      if (!message.projects.every((p) => httpProjectAllowed(p, allowed()))) throw new GatewayError(403, "Project is not allowed.");
       return message.meta?.worktree ? { worktree: JSON.parse(message.meta.worktree) as Worktree } : {};
     },
     // The common agent records replies in SQLite; clients read them over HTTP.
     async reply() {},
   };
 }
+
+/** Allowed project ids; a function is asked on every request, so edits apply without a restart. */
+export type Allowed = string[] | (() => string[]);
 
 /** Project ids are matched exactly; a wildcard must be granted in the local config. */
 export function httpProjectAllowed(project: string, projects?: string[]): boolean {

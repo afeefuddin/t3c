@@ -7,7 +7,7 @@ import { ClaudeBrain, checkClaudeCli } from "./agent/claude.ts";
 import { AgentToolServer } from "./agent/mcp.ts";
 import { overriddenSkills } from "./agent/skills.ts";
 import { isLoggedIn, t3Auth } from "./auth.ts";
-import { loadConfig, paths, saveConfig, VERSION } from "./config.ts";
+import { allowedProjects, loadConfig, paths, saveConfig, VERSION } from "./config.ts";
 import { type Brain, SimpleBrain } from "./brain.ts";
 import { describeGateways, logs, runningPid, start, status, stop } from "./daemon.ts";
 import { Dispatcher } from "./dispatch.ts";
@@ -15,6 +15,7 @@ import type { Gateway } from "./gateway.ts";
 import { httpGateway } from "./gateways/http.ts";
 import { SlackGateway } from "./gateways/slack.ts";
 import { HttpApi } from "./http-api.ts";
+import { editProjects, findConnection, showProjects } from "./projects.ts";
 import { color, errorMessage, log, preview } from "./log.ts";
 import { createApp } from "./server.ts";
 import { funnelBaseUrl, funnelProblem } from "./tailscale.ts";
@@ -54,7 +55,9 @@ ${color("bold", "Run")}
   t3c messages [-n 20]           what's in progress, and the latest messages
 
 ${color("bold", "Other")}
-  t3c projects                   list T3 projects
+  t3c projects                   T3 projects, and which ones Slack and Instinct may use
+  t3c projects slack | instinct  choose them from a checklist (applies at once)
+  t3c projects slack add <p>…    or allow (add) / stop allowing (remove) projects by name
   t3c run "<prompt>" --project <p>   start a T3 thread right now
   t3c serve                      run in the foreground
   t3c --version                  which t3c this is
@@ -160,9 +163,13 @@ try {
       break;
 
     case "projects": {
-      const t3 = await T3Client.connect(t3Auth());
-      for (const p of await t3.listProjects()) console.log(`${p.title.padEnd(24)} ${color("dim", p.workspaceRoot)}`);
-      await t3.close();
+      if (rest[0]) findConnection(loadConfig(), rest[0]); // a missing connection says so before T3 is asked
+      const t3 = await T3Client.connect(t3Auth()).catch((e) => {
+        throw new Error(`Couldn't reach T3 Code (${errorMessage(e)}). Open it and try again.`);
+      });
+      const projects = await t3.listProjects().finally(() => t3.close());
+      if (rest[0]) await editProjects(rest[0], rest[1], rest.slice(2), projects);
+      else showProjects(loadConfig(), projects);
       break;
     }
 
@@ -307,12 +314,10 @@ async function serve() {
 
   const localChatToken = chatToken();
   const gateways: Gateway[] = [httpGateway(localChatToken, { source: "cli", projects: ["*"], requireIdempotencyKey: true })];
-  if (config.http) gateways.push(httpGateway(config.http.secret, {
-    projects: config.http.projects ?? (config.http.public ? [] : undefined),
-    requireIdempotencyKey: config.http.public,
-  }));
+  const httpProjects = savedProjects("http");
+  if (config.http) gateways.push(httpGateway(config.http.secret, { projects: httpProjects, requireIdempotencyKey: config.http.public }));
   if (config.slack) {
-    const slack = new SlackGateway(config.slack, { store });
+    const slack = new SlackGateway(config.slack, { store, projects: savedProjects("slack") });
     await slack.init();
     gateways.push(slack);
   }
@@ -323,7 +328,10 @@ async function serve() {
   }
   // T3 Code may start after t3c or restart while it runs; the client connects whenever it's back.
   const t3 = T3Client.lazy(t3Auth());
-  await t3.listProjects().catch((e) => log("t3c", `T3 Code isn't reachable yet (${errorMessage(e)}); t3c connects once it is`, "warn"));
+  const projects = await t3.listProjects().catch((e) => {
+    log("t3c", `T3 Code isn't reachable yet (${errorMessage(e)}); t3c connects once it is`, "warn");
+    return [];
+  });
   const agentTools = new AgentToolServer();
   const simple = new SimpleBrain();
   let brain: Brain = simple;
@@ -353,14 +361,14 @@ async function serve() {
   // Never bind publicly: the internet reaches t3c only through Tailscale Funnel, and only /hooks.
   const httpApi = config.http?.public
     ? new HttpApi({
-        secret: config.http.secret, projects: config.http.projects ?? [], store, t3,
+        secret: config.http.secret, projects: httpProjects, store, t3,
         publicUrl: config.http.publicUrl ?? await funnelBaseUrl(),
       })
     : undefined;
   const server = createApp({ gateways, worker, store, secret: config.http?.secret, agentTools, httpApi, chatSecret: localChatToken });
   server.listen(config.port, "127.0.0.1", () => {
     log("t3c", `listening on 127.0.0.1:${config.port}; threads run as ${config.runtimeMode}; brain: ${brain.name}`, "ok");
-    for (const line of describeGateways(config)) log("t3c", line);
+    for (const line of describeGateways(config, projects)) log("t3c", line);
   });
   server.on("error", (error) => {
     log("t3c", `can't listen on port ${config.port}: ${errorMessage(error)}`, "error");
@@ -408,4 +416,19 @@ async function agent(provider: string | undefined, model?: string) {
     say.info(config.agent ? `Agent: ${config.agent.provider}${config.agent.model ? ` (${config.agent.model})` : ""}` : "Agent: off (fixed rules)");
     say.hint("t3c agent codex|claude [--model <m>] | t3c agent off");
   }
+}
+
+/**
+ * A connection's projects, read from the saved config for each message so `t3c projects` applies
+ * at once. A config that can't be read allows nothing rather than everything.
+ */
+function savedProjects(kind: "slack" | "http"): () => string[] {
+  return () => {
+    try {
+      return allowedProjects(loadConfig(), kind);
+    } catch (error) {
+      log("t3c", `can't read ${paths.config} (${errorMessage(error)}); ${kind} may use no projects until it's fixed`, "error");
+      return [];
+    }
+  };
 }

@@ -84,6 +84,18 @@ test("any channel the bot is in works, with the configured projects", async () =
   assert.deepEqual(gateway.receive(eventCallback({ channel: "CNEW" })).message?.projects, ["demo", "web"]);
 });
 
+test("each message gets the projects saved at that moment, so changes need no restart", async () => {
+  let saved = ["demo"];
+  const gateway = new SlackGateway(
+    { signingSecret: SECRET, botToken: "xoxb", projects: ["demo"], allowedUsers: ["UALICE"] },
+    { store: new Store(":memory:"), slack: async () => ({ user_id: BOT }), projects: () => saved },
+  );
+  await gateway.init();
+  assert.deepEqual(gateway.receive(eventCallback({}, "Ev1")).message?.projects, ["demo"]);
+  saved = ["p2", "p3"];
+  assert.deepEqual(gateway.receive(eventCallback({ ts: "100.2" }, "Ev2")).message?.projects, ["p2", "p3"]);
+});
+
 test("in a DM every message is a request, mention or not, and replies in its Slack thread follow up", async () => {
   const { gateway, store } = await setup();
   const dm = (event: Partial<SlackEvent>, id: string) => gateway.receive(eventCallback({ type: "message", channel: "D1", ...event }, id)).message;

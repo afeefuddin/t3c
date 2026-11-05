@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -61,4 +63,16 @@ test("GitHub connector commands are no longer available", () => {
     assert.match(result.stderr, new RegExp(`Usage: t3c ${command} slack \\| http \\| instinct`));
     assert.doesNotMatch(result.stderr, /gh auth|not connected|node:internal/);
   }
+});
+
+test("editing a connection's projects needs that connection and a known kind", () => {
+  const home = mkdtempSync(join(tmpdir(), "t3c-cli-"));
+  const runIn = (...args: string[]) => spawnSync(process.execPath, ["--disable-warning=ExperimentalWarning", cli, ...args], {
+    encoding: "utf8", env: { ...process.env, NO_COLOR: "1", T3C_HOME: home },
+  });
+  assert.match(runIn("projects", "slack").stderr, /Slack isn't connected\. Run `t3c add slack` first\./);
+  assert.match(runIn("projects", "instinct").stderr, /Instinct isn't connected\. Run `t3c add instinct` first\./);
+  const unknown = runIn("projects", "github");
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /Usage: t3c projects \[slack \| instinct\]/);
 });

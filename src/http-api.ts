@@ -1,16 +1,21 @@
 import type { IncomingHttpHeaders } from "node:http";
 import { VERSION } from "./config.ts";
 import { GatewayError, header, safeEqual, type InboundMessage } from "./gateway.ts";
-import { httpProjectAllowed } from "./gateways/http.ts";
+import { type Allowed, httpProjectAllowed } from "./gateways/http.ts";
 import type { Store, StoredMessage } from "./store.ts";
 import type { T3 } from "./t3.ts";
 
 /** Remote clients get HTTP conversations and T3 answers, never internal agent runs or other gateways. */
 export class HttpApi {
-  private readonly deps: { secret: string; projects: string[]; store: Store; t3: T3; publicUrl?: string };
+  private readonly deps: { secret: string; projects: Allowed; store: Store; t3: T3; publicUrl?: string };
 
-  constructor(deps: { secret: string; projects: string[]; store: Store; t3: T3; publicUrl?: string }) {
+  constructor(deps: { secret: string; projects: Allowed; store: Store; t3: T3; publicUrl?: string }) {
     this.deps = deps;
+  }
+
+  private allowed(project: string) {
+    const { projects } = this.deps;
+    return httpProjectAllowed(project, typeof projects === "function" ? projects() : projects);
   }
 
   get publicUrl(): string | undefined {
@@ -25,16 +30,16 @@ export class HttpApi {
 
   async projects() {
     return (await this.deps.t3.listProjects())
-      .filter((p) => httpProjectAllowed(p.id, this.deps.projects))
+      .filter((p) => this.allowed(p.id))
       .map(({ id, title }) => ({ id, title }));
   }
 
   /** Validate before enqueueing: retries must be identical and the conversation must remain accessible. */
   existingDelivery(message: InboundMessage): StoredMessage | undefined {
-    const { store, projects } = this.deps;
-    if (!message.projects.every((p) => httpProjectAllowed(p, projects))) throw new GatewayError(403, "Project is not allowed.");
+    const { store } = this.deps;
+    if (!message.projects.every((p) => this.allowed(p))) throw new GatewayError(403, "Project is not allowed.");
     const conversation = store.findConversation("http", message.conversationId);
-    if (conversation && !store.conversationProjects(conversation.id).every((p) => httpProjectAllowed(p, projects))) {
+    if (conversation && !store.conversationProjects(conversation.id).every((p) => this.allowed(p))) {
       throw new GatewayError(403, "Conversation is not allowed.");
     }
     const previous = store.findDelivery("http", message.eventKey);
@@ -54,12 +59,12 @@ export class HttpApi {
   }
 
   async result(messageId: string) {
-    const { store, projects, t3 } = this.deps;
+    const { store, t3 } = this.deps;
     const message = store.getMessage(messageId);
     const conversation = message && store.getConversation(message.conversationId);
     if (
       !message?.inbound || message.direction !== "in" || conversation?.source !== "http" ||
-      !store.conversationProjects(conversation.id).every((p) => httpProjectAllowed(p, projects))
+      !store.conversationProjects(conversation.id).every((p) => this.allowed(p))
     ) {
       throw new GatewayError(404, "Not found.");
     }

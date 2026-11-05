@@ -25,7 +25,8 @@ const output = new Writable({
   },
 });
 
-async function question(prompt: string, hidden = false): Promise<string> {
+/** One line of input, trimmed. */
+export async function question(prompt: string, hidden = false): Promise<string> {
   if (!process.stdin.isTTY) throw new Error("This command is interactive; run it in a terminal.");
   const rl = createInterface({ input: process.stdin, output, terminal: true });
   try {

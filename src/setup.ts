@@ -6,10 +6,11 @@ import { findSlackUsers, SLACK_BOT_SCOPES, slackApi, slackAppInfo, slackManifest
 import { errorMessage } from "./log.ts";
 import { isLoggedIn, t3Auth } from "./auth.ts";
 import { instinctInstructions, verifyHttpApi } from "./http-api.ts";
-import { T3Client } from "./t3.ts";
+import { type Project, T3Client } from "./t3.ts";
 import { runningPid, start, stop } from "./daemon.ts";
 import { slackChallengeServer } from "./server.ts";
 import { disableFunnel, enableFunnel, funnelBaseUrl, funnelProblem } from "./tailscale.ts";
+import { describeAllowed, pickProjects } from "./projects.ts";
 import { ask, choose, confirm, say } from "./ui.ts";
 
 /**
@@ -78,9 +79,11 @@ export async function addSlack() {
   slack.allowedUsers = allowed.map((u) => u.id);
   say.ok(`Allowed: ${allowed.map((u) => `@${u.name}`).join(", ")}`);
 
-  slack.projects = await chooseProjects("Which T3 projects may the bot work on?", slack.projects);
+  const projects = await listProjectsQuietly();
+  if (projects.length > 0) slack.projects = await pickProjects("Slack", slack.projects, projects);
+  else say.hint("Open T3 Code, then choose them with `t3c projects slack`.");
   saveConfig({ ...loadConfig(), slack });
-  say.ok(`Projects: ${slack.projects.join(", ")}`);
+  say.ok(`Slack can work on ${describeAllowed(slack.projects, projects)}.`);
   if (!loadConfig().agent && (slack.projects.length > 1 || slack.projects[0] === "*")) {
     say.hint("Messages pick one with `in:<project>`, or turn on `t3c agent codex` to let Codex pick.");
   }
@@ -125,7 +128,9 @@ export async function addInstinct() {
   if (problem) throw new Error(problem);
   const base = await publicUrl();
   const config = loadConfig();
-  const projects = await chooseProjects("Which T3 projects may Instinct work on?", config.http?.projects, true);
+  const available = await listProjectsQuietly();
+  if (available.length === 0) throw new Error("Couldn't list T3 projects. Open T3 Code with at least one project, then try again.");
+  const projects = await pickProjects("Instinct", config.http?.projects ?? [], available);
   const secret = config.http?.secret ?? randomBytes(32).toString("base64url");
   saveConfig({ ...config, http: { secret, projects, public: true, publicUrl: base } });
   say.step("Publish and check the connection");
@@ -160,30 +165,6 @@ export async function remove(kind: string, target?: string) {
   saveConfig(config);
   if (wasPublic && !needsFunnel(config)) await disableFunnel();
   await finish(`Removed ${[kind, target].filter(Boolean).join(" ")}.`);
-}
-
-/** One or more projects (numbers or names, comma-separated), or * for any. Keeps `current` on Enter. */
-async function chooseProjects(label: string, current: string[] = [], ids = false): Promise<string[]> {
-  const projects = await listProjectsQuietly();
-  if (ids && projects.length === 0) throw new Error("Couldn't list T3 projects. Open T3 Code with at least one project, then try again.");
-  if (projects.length > 0) {
-    say.info(label);
-    projects.forEach((p, i) => say.info(`  ${i + 1}. ${p.title}`));
-    say.info("  *. any project");
-  }
-  const pick = (x: string) => projects[Number(x) - 1] ?? projects.find((p) => p.id === x || p.title.toLowerCase() === x.toLowerCase());
-  const answer = await ask(projects.length > 0 ? "Numbers or names, comma-separated (or *)" : `${label} Project names, comma-separated (or *)`, {
-    default: current.join(", ") || undefined,
-    validate: (v) =>
-      split(v).every((x) => x === "*" || !projects.length || pick(x)) ? undefined : `Pick from 1–${projects.length}, a project's name, or *.`,
-  });
-  const picks = split(answer);
-  if (picks.includes("*")) return ["*"];
-  return picks.map((x) => {
-    if (projects.length === 0) return x;
-    const project = pick(x)!;
-    return ids ? project.id : project.title;
-  });
 }
 
 /** Picks the model for the threads t3c starts, from the providers enabled in T3. */
@@ -223,8 +204,8 @@ async function answerSlackUrlCheck(port: number): Promise<() => Promise<void>> {
   };
 }
 
-async function listProjectsQuietly(): Promise<{ id: string; title: string }[]> {
-  let projects: { id: string; title: string }[] = [];
+async function listProjectsQuietly(): Promise<Project[]> {
+  let projects: Project[] = [];
   try {
     const t3 = await T3Client.connect(t3Auth());
     projects = await t3.listProjects();

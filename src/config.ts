@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeMode, ThreadModel } from "./t3.ts";
@@ -17,7 +17,7 @@ export interface Config {
   slack?: {
     signingSecret: string;
     botToken: string;
-    /** T3 projects (titles or ids) the bot may work in, from any channel it's in or a DM; "*" means any. */
+    /** T3 project ids (titles in older configs) the bot may work in, from any channel or DM; "*" means any. */
     projects: string[];
     /** Slack user ids allowed to use the bot. */
     allowedUsers: string[];
@@ -70,10 +70,23 @@ export function loadConfig(): Config {
   return config;
 }
 
+/** Written whole and then moved into place: the running service reads it while t3c commands edit it. */
 export function saveConfig(config: Config) {
   mkdirSync(home, { recursive: true, mode: 0o700 });
-  writeFileSync(paths.config, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(paths.config, 0o600);
+  const next = `${paths.config}.${process.pid}.tmp`;
+  writeFileSync(next, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(next, 0o600);
+  renameSync(next, paths.config);
+}
+
+/**
+ * Projects a connection may work in: ids (older Slack configs have titles), or ["*"] for any.
+ * None once the connection is removed. A local HTTP gateway from before project lists allows any.
+ */
+export function allowedProjects(config: Config, kind: "slack" | "http"): string[] {
+  if (kind === "slack") return config.slack?.projects ?? [];
+  if (!config.http) return [];
+  return config.http.projects ?? (config.http.public ? [] : ["*"]);
 }
 
 /** T3's MCP endpoint: $T3_MCP_URL, else where the T3 desktop app says its server listens. */

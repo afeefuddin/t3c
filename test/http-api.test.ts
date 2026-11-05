@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { test, type TestContext } from "node:test";
 import { SimpleBrain, type Brain } from "../src/brain.ts";
 import { Dispatcher } from "../src/dispatch.ts";
-import { httpGateway } from "../src/gateways/http.ts";
+import { type Allowed, httpGateway } from "../src/gateways/http.ts";
 import { HttpApi, instinctInstructions, verifyHttpApi } from "../src/http-api.ts";
 import { createApp } from "../src/server.ts";
 import { Store } from "../src/store.ts";
@@ -15,7 +15,7 @@ import { message } from "./helpers.ts";
 const secret = "s".repeat(32);
 const task = { conversationId: "instinct-job", project: "p1", title: "Fix login", prompt: "Fix the login bug", idempotencyKey: "request-1" };
 
-async function setup(t: TestContext, projects = ["p1"], brain: Brain = new SimpleBrain()) {
+async function setup(t: TestContext, projects: Allowed = ["p1"], brain: Brain = new SimpleBrain()) {
   const store = new Store(":memory:");
   const t3 = new FakeT3();
   let latest: ThreadReply = { status: "running", text: "Working on the login bug" };
@@ -34,6 +34,17 @@ async function setup(t: TestContext, projects = ["p1"], brain: Brain = new Simpl
   });
   return { store, t3, worker, base, get, post, deps, answer: (reply: ThreadReply) => { latest = reply; } };
 }
+
+test("project changes apply to the next request without a restart", async (t) => {
+  let saved = ["p1"];
+  const { get, post } = await setup(t, () => saved);
+  assert.deepEqual(await (await get("/hooks/http/projects")).json(), [{ id: "p1", title: "Demo" }]);
+  saved = [];
+  assert.deepEqual(await (await get("/hooks/http/projects")).json(), []);
+  assert.equal((await post(task)).status, 403);
+  saved = ["p1"];
+  assert.equal((await post(task)).status, 202);
+});
 
 test("remote API publishes discovery and lists only authorized projects without local paths", async (t) => {
   const { base, get } = await setup(t);

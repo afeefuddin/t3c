@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isLoggedIn, t3Auth } from "./auth.ts";
-import { type Config, home, loadConfig, needsFunnel, paths, t3McpUrl } from "./config.ts";
+import { allowedProjects, type Config, home, loadConfig, needsFunnel, paths, t3McpUrl } from "./config.ts";
 import { PROBE_USER_AGENT } from "./gateway.ts";
 import { slackApi } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
+import { describeAllowed, normalize } from "./projects.ts";
 import { Store } from "./store.ts";
-import { T3Client } from "./t3.ts";
+import { type Project, T3Client } from "./t3.ts";
 import { disableFunnel, enableFunnel, funnelBaseUrl } from "./tailscale.ts";
 import { say } from "./ui.ts";
 
@@ -85,12 +86,14 @@ export async function status() {
   say.info(`threads run as ${config.runtimeMode} on ${config.model?.model ?? "each project's default model"}; brain: ${config.agent ? `${config.agent.provider} (skills in ${paths.skills})` : "fixed rules"}`);
 
   say.step("Connections");
+  let projects: Project[] = [];
   if (!isLoggedIn(paths.auth)) say.warn("T3 Code: not logged in — `t3c login`");
   else {
     await check(`T3 Code at ${t3McpUrl()}`, async () => {
       const t3 = await T3Client.connect(t3Auth());
       try {
-        return `${(await t3.listProjects()).length} projects`;
+        projects = await t3.listProjects();
+        return `${projects.length} projects`;
       } finally {
         await t3.close();
       }
@@ -122,7 +125,7 @@ export async function status() {
   }
 
   say.step("Gateways");
-  for (const line of describeGateways(config)) say.info(line);
+  for (const line of describeGateways(config, projects)) say.info(line);
   const store = new Store(paths.state);
   const last = store.recentMessages(50).findLast((m) => m.direction === "in");
   if (last) say.info(`last message received ${new Date(last.createdAt).toLocaleString()} — \`t3c messages\` for more`);
@@ -144,14 +147,16 @@ export function logs(follow: boolean) {
   spawn("tail", ["-n", "50", "-f", paths.log], { stdio: "inherit" });
 }
 
-export function describeGateways(config: Config): string[] {
+/** One line per gateway; with T3's projects, their names instead of ids. */
+export function describeGateways(config: Config, projects: Project[] = []): string[] {
   const lines: string[] = [];
+  const allowed = (kind: "slack" | "http") => describeAllowed(normalize(allowedProjects(config, kind), projects), projects);
   if (config.slack) {
-    lines.push(`slack   any channel or DM→${config.slack.projects.join("|")}; ${config.slack.allowedUsers.length} allowed user(s)`);
+    lines.push(`slack   any channel or DM; projects: ${allowed("slack")}; ${config.slack.allowedUsers.length} allowed user(s)`);
   }
   if (config.http) lines.push(config.http.public
-    ? `http    public agent API (Instinct); projects: ${(config.http.projects ?? []).join("|") || "none"}`
-    : "http    POST /hooks/http (bearer secret)");
+    ? `http    public agent API (Instinct); projects: ${allowed("http")}`
+    : `http    POST /hooks/http (bearer secret); projects: ${allowed("http")}`);
   return lines.length > 0 ? lines : ["none yet — `t3c add slack`, `t3c add http`, `t3c add instinct`"];
 }
 

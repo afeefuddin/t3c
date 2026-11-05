@@ -33,7 +33,15 @@ apps in your Slack workspace.
 
 Invite your bot to a channel and mention it with a task, or send it a DM.
 Replies in the same Slack thread continue the task; answers are posted back there.
-Run `t3c add slack` to change the connection settings later.
+Run `t3c add slack` to change the other connection settings later.
+
+## Choose projects
+
+`t3c projects` shows every T3 project and whether Slack and Instinct may use it.
+`t3c projects slack` (or `instinct`) opens a checklist: type numbers or names to switch them on or
+off, then press Enter to save. `*` allows any project, including ones you add to T3 Code later.
+For a one-liner, use `t3c projects slack add web-app` or `t3c projects slack remove web-app`.
+Changes apply to the next message; t3c doesn't need a restart.
 
 ## Connect Instinct
 
@@ -87,6 +95,7 @@ Instinct and HTTP use the same agent; a project can be specified or left for the
 | `t3c restart` | Apply configuration changes |
 | `t3c logs -f` | Follow logs |
 | `t3c messages` | See recent messages and work in progress |
+| `t3c projects` | See and change which projects Slack and Instinct may use |
 | `t3c model` | Choose the coding model |
 | `t3c remove slack` / `t3c remove instinct` | Disconnect Slack or the shared Instinct/HTTP gateway |
 | `t3c --help` | Show all commands |

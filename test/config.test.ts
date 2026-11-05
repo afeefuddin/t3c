@@ -33,7 +33,7 @@ test("status describes each gateway in one line", () => {
     runtimeMode: "auto",
     slack: { signingSecret: "s", botToken: "b", projects: ["demo"], allowedUsers: ["U1"] },
   });
-  assert.deepEqual(lines, ["slack   any channel or DM→demo; 1 allowed user(s)"]);
+  assert.deepEqual(lines, ["slack   any channel or DM; projects: demo; 1 allowed user(s)"]);
 });
 
 test("a Slack config from per-channel days keeps its projects, now for every channel", () => {
