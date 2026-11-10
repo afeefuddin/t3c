@@ -10,9 +10,14 @@ const run = promisify(execFile);
  */
 export const FUNNEL_PORT = 10000;
 
+/** Runs the tailscale CLI; a failure's message is what tailscale printed about it. */
 async function tailscale(...args: string[]) {
-  const { stdout } = await run(process.env.TAILSCALE_BIN ?? "tailscale", args);
-  return stdout;
+  try {
+    return (await run(process.env.TAILSCALE_BIN ?? "tailscale", args)).stdout;
+  } catch (error) {
+    const stderr = (error as { stderr?: string }).stderr?.trim();
+    throw stderr ? new Error(stderr, { cause: error }) : error;
+  }
 }
 
 /** https://<machine>.<tailnet>.ts.net:<port>, the public base URL Funnel serves. */
@@ -30,7 +35,7 @@ export async function funnelProblem(): Promise<string | undefined> {
     status = JSON.parse(await tailscale("status", "--json"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return "Tailscale isn't installed: https://tailscale.com/download";
-    return `Tailscale isn't working: ${(error as { stderr?: string }).stderr?.trim() || error}`;
+    return `Tailscale isn't working: ${error instanceof Error ? error.message : error}`;
   }
   if (status.BackendState !== "Running") return `Tailscale is ${status.BackendState}: connect it (\`tailscale up\`).`;
   const caps = status.Self?.CapMap ?? {};

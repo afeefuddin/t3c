@@ -118,6 +118,7 @@ export class SlackGateway implements Gateway {
   private readonly store: Store;
   private readonly slack: SlackCall;
   private botUserId = "";
+  private connecting?: Promise<void>;
   /** Messages after this were sent while t3c was running, so any it doesn't have were lost. */
   private readonly startedAt = Date.now() / 1000;
   private readonly names = new Map<string, Promise<string>>();
@@ -130,14 +131,27 @@ export class SlackGateway implements Gateway {
     this.slack = deps.slack ?? slackApi(config.botToken);
   }
 
-  /** Looks up the bot's own user id, which mention handling needs. */
-  async init() {
-    const { user_id } = await this.slack("auth.test");
-    this.botUserId = user_id;
+  /**
+   * Looks up the bot's own user id, which mention handling needs. t3c starts even when Slack can't
+   * be reached; this is tried again by every catch-up and webhook until it works.
+   */
+  init(): Promise<void> {
+    if (this.botUserId) return Promise.resolve();
+    this.connecting ??= this.slack("auth.test")
+      .then(({ user_id }) => {
+        this.botUserId = user_id;
+      })
+      .finally(() => (this.connecting = undefined));
+    return this.connecting;
   }
 
   receive({ headers, body }: GatewayRequest): Received {
     this.verify(headers, body);
+    if (!this.botUserId) {
+      // Slack delivers it again shortly, and catch-up finds it anyway once connected.
+      void this.init().catch(() => {});
+      throw new GatewayError(503, "Not connected to Slack yet.");
+    }
     const payload = JSON.parse(body.toString("utf8"));
     if (payload.type !== "event_callback") return {};
     if (process.env.T3C_DEBUG) {
@@ -154,6 +168,7 @@ export class SlackGateway implements Gateway {
    * in the channels and DMs the bot is in, and replies in followed threads.
    */
   async catchUp(): Promise<InboundMessage[]> {
+    await this.init();
     return [...(await this.missedMentions()), ...(await this.missedReplies())];
   }
 

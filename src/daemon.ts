@@ -55,8 +55,14 @@ export async function start(entry: string) {
   say.ok(`Running in the background (pid ${child.pid}), listening on 127.0.0.1:${config.port}.`);
   // Only once t3c itself answers on the port is it published, so Funnel never exposes something else.
   if (needsFunnel(config)) {
-    const hooks = await enableFunnel(config.port);
-    say.ok(`Tailscale Funnel: ${hooks} (only /hooks is public)`);
+    try {
+      say.ok(`Tailscale Funnel: ${await enableFunnel(config.port)} (only /hooks is public)`);
+    } catch (error) {
+      // t3c still runs: terminal chat works, and Slack messages sent meanwhile are caught up on later.
+      say.warn(`t3c is running, but Slack and Instinct can't reach it: Tailscale Funnel didn't turn on (${errorMessage(error)}).`);
+      say.hint("Once Tailscale is connected, run `t3c restart`. Slack messages sent meanwhile are picked up then.");
+      process.exitCode = 1;
+    }
   }
   say.hint(`Logs: t3c logs -f   Stop: t3c stop`);
 }

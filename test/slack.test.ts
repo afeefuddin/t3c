@@ -56,6 +56,24 @@ test("rejects requests without a valid, fresh Slack signature", async () => {
   assert.throws(() => gateway.receive({ headers: {}, body: Buffer.from("{}") }), { status: 401 });
 });
 
+test("t3c runs while Slack is unreachable: webhooks are refused for a retry until it connects", async () => {
+  let reachable = false;
+  const slack = async (method: string) => {
+    if (!reachable) throw new Error("getaddrinfo ENOTFOUND slack.com");
+    return method === "auth.test" ? { user_id: BOT } : { channels: [], messages: [] };
+  };
+  const gateway = new SlackGateway({ signingSecret: SECRET, botToken: "xoxb", projects: ["demo"], allowedUsers: ["UALICE"] }, { store: new Store(":memory:"), slack });
+  await assert.rejects(gateway.init(), /ENOTFOUND/);
+  // Signature first: the unauthenticated still get 401, not a hint that Slack is down.
+  assert.throws(() => gateway.receive(signed({ type: "event_callback" }, { secret: "wrong" })), { status: 401 });
+  assert.throws(() => gateway.receive(eventCallback({})), { status: 503 });
+  await assert.rejects(gateway.catchUp(), /ENOTFOUND/);
+
+  reachable = true;
+  await gateway.catchUp(); // connects, and looks for what was missed meanwhile
+  assert.equal(gateway.receive(eventCallback({})).message?.text, "fix the login bug");
+});
+
 test("Slack's URL check is answered with only its own challenge", () => {
   const body = (payload: unknown) => Buffer.from(JSON.stringify(payload));
   assert.equal(slackChallenge(body({ type: "url_verification", challenge: "abc" })), "abc");

@@ -36,10 +36,11 @@ export async function serve() {
   if (config.http) gateways.push(httpGateway(config.http.secret, { projects: httpProjects, requireIdempotencyKey: config.http.public }));
   if (config.slack) {
     const slack = new SlackGateway(config.slack, { store, projects: savedProjects("slack") });
-    await slack.init();
+    // Slack being unreachable (offline, an outage) mustn't take terminal chat and Instinct down with
+    // it: catch-up keeps trying, and recovers the messages sent meanwhile once it gets through.
+    await slack.init().catch((e) => log("slack", `can't reach Slack yet (${errorMessage(e)}); retrying in the background`, "warn"));
     gateways.push(slack);
   }
-  if (gateways.length === 0) throw new Error("No gateways configured. Run `t3c add slack`, `t3c add http` or `t3c add instinct` first.");
 
   if (config.runtimeMode === "full-access") {
     log("t3c", "runtimeMode is full-access: chat messages can run any command on this machine", "warn");
@@ -54,6 +55,8 @@ export async function serve() {
   const simple = new SimpleBrain();
   let brain: Brain = simple;
   if (config.agent) {
+    const replaced = overriddenSkills(paths.skills);
+    if (replaced.length > 0) log("agent", `your ${replaced.join(", ")} in ${paths.skills} replace the built-in skills of that name`, "warn");
     const options = {
       toolServer: agentTools,
       toolsUrl: `http://127.0.0.1:${config.port}/agent/mcp`,
@@ -63,10 +66,6 @@ export async function serve() {
       fallback: simple,
     };
     brain = config.agent.provider === "claude" ? new ClaudeBrain(options) : new CodexBrain(options);
-  }
-  if (config.agent) {
-    const replaced = overriddenSkills(paths.skills);
-    if (replaced.length > 0) log("agent", `your ${replaced.join(", ")} in ${paths.skills} replace the built-in skills of that name`, "warn");
   }
   const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store, config), store, t3, brain });
   worker.start();
@@ -80,7 +79,11 @@ export async function serve() {
   const httpApi = config.http?.public
     ? new HttpApi({
         secret: config.http.secret, projects: httpProjects, store, t3,
-        publicUrl: config.http.publicUrl ?? await funnelBaseUrl(),
+        // Configs from before setup saved it. Without Tailscale, discovery uses relative URLs.
+        publicUrl: config.http.publicUrl ?? await funnelBaseUrl().catch((e) => {
+          log("http", `no public URL for the Instinct API (${errorMessage(e)}); run \`t3c add instinct\` again once Tailscale works`, "warn");
+          return undefined;
+        }),
       })
     : undefined;
   const server = createApp({ gateways, worker, store, secret: config.http?.secret, agentTools, httpApi, chatSecret: localChatToken });
