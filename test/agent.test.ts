@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -156,27 +156,58 @@ test("skills are SKILL.md folders: built-ins always used, the user's replace or 
   assert.doesNotMatch(prompt, /# Mine|# Deploys/);
 });
 
-test("runs keep the user's Codex config but switch off their MCP servers, hooks and built-in tools", async () => {
-  const codexHome = mkdtempSync(join(tmpdir(), "codex-home-"));
-  writeFileSync(
-    join(codexHome, "config.toml"),
-    'model_provider = "proxy"\n[mcp_servers.notion]\nurl = "x"\n[mcp_servers.node_repl.env]\nA = "1"\n[mcp_servers."my server"]\ncommand = "y"\n',
-  );
-  const fakeCodex = join(codexHome, "codex");
-  writeFileSync(fakeCodex, '#!/bin/sh\necho "shell_tool  stable  true"\necho "memories  stable  true"\necho "something_else  stable  true"\n');
-  chmodSync(fakeCodex, 0o755);
-  assert.deepEqual(await lockdownArgs(fakeCodex, codexHome), [
-    "-c",
-    "notify=[]",
-    "-c",
-    "mcp_servers.notion.enabled=false",
-    "-c",
-    'mcp_servers."my server".enabled=false',
-    "--disable",
-    "shell_tool",
-    "--disable",
-    "memories",
-  ]);
+test("runs keep the user's Codex config but switch off every MCP server Codex would start, and its built-in tools", async () => {
+  process.env.FAKE_CODEX_MCP = JSON.stringify(["notion", "computer-use", "t3c"]);
+  try {
+    assert.deepEqual(await lockdownArgs(FAKE_CODEX), [
+      "-c", "notify=[]",
+      "--disable", "shell_tool",
+      "--disable", "memories",
+      "-c", "mcp_servers.notion.enabled=false",
+      "-c", "mcp_servers.computer-use.enabled=false",
+    ]);
+  } finally {
+    delete process.env.FAKE_CODEX_MCP;
+  }
+});
+
+test("no run starts when a Codex MCP server can't be switched off", async () => {
+  try {
+    // Codex would read the quotes of `mcp_servers."my server"` as part of the name.
+    process.env.FAKE_CODEX_MCP = JSON.stringify(["notion", "my server"]);
+    await assert.rejects(lockdownArgs(FAKE_CODEX), /can't turn off the Codex MCP server "my server"/);
+    // Checked, not assumed: a server that stays on despite the override stops it too.
+    process.env.FAKE_CODEX_MCP = JSON.stringify(["notion", "sentry"]);
+    process.env.FAKE_CODEX_STUCK = "sentry";
+    await assert.rejects(lockdownArgs(FAKE_CODEX), /sentry stay on despite t3c's lockdown/);
+
+    // The run falls back to the fixed rules instead.
+    const { t3, worker } = setup();
+    worker.enqueue(message());
+    await worker.idle();
+    assert.equal(t3.launches.length, 1);
+    assert.match(t3.launches[0].message, /^fix the login bug/);
+  } finally {
+    delete process.env.FAKE_CODEX_MCP;
+    delete process.env.FAKE_CODEX_STUCK;
+  }
+});
+
+test("stopping t3c ends a lockdown probe that hangs, rather than leaving it behind", async () => {
+  const pidFile = join(mkdtempSync(join(tmpdir(), "codex-hang-")), "pid");
+  process.env.FAKE_CODEX_HANG = pidFile;
+  try {
+    const stop = new AbortController();
+    const lockdown = lockdownArgs(FAKE_CODEX, stop.signal);
+    while (!existsSync(pidFile)) await new Promise((r) => setTimeout(r, 10));
+    stop.abort();
+    await assert.rejects(lockdown);
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  } finally {
+    delete process.env.FAKE_CODEX_HANG;
+  }
 });
 
 test("the agent speaks as the one doing the work, never as handing it off", () => {

@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -55,7 +55,8 @@ const FEATURES_OFF = [
 export class CodexBrain implements Brain {
   readonly name = "codex";
   private readonly options: CodexOptions;
-  private lockdown: Promise<string[]> | undefined;
+  /** Lockdown flags for the Codex config as of `stamp`; finding the servers takes Codex seconds. */
+  private lockdown: { stamp: string; args: Promise<string[]> } | undefined;
 
   constructor(options: CodexOptions) {
     this.options = options;
@@ -66,8 +67,7 @@ export class CodexBrain implements Brain {
     const token = this.options.toolServer.open(tools, skills);
     try {
       const { prompt, images } = await prepareAgentPrompt(event, tools, skills);
-      this.lockdown ??= lockdownArgs(this.options.codexBin ?? "codex");
-      return await this.exec(prompt, token, await this.lockdown, images, signal);
+      return await this.exec(prompt, token, await this.lockdownArgs(signal), images, signal);
     } catch (error) {
       if (tools.acted || signal?.aborted) throw error;
       log("agent", `codex failed before acting (${errorMessage(error)}); using the simple rules`, "warn");
@@ -75,6 +75,19 @@ export class CodexBrain implements Brain {
     } finally {
       this.options.toolServer.close(token);
     }
+  }
+
+  /** Shared by concurrent runs; `signal` (the service's, aborted when it stops) ends the probes. */
+  private lockdownArgs(signal?: AbortSignal): Promise<string[]> {
+    const stamp = codexConfigStamp();
+    if (this.lockdown?.stamp !== stamp) {
+      const args = lockdownArgs(this.options.codexBin ?? "codex", signal).catch((error) => {
+        if (this.lockdown?.args === args) this.lockdown = undefined; // tried again next run
+        throw new Error(`Codex can't be locked down for t3c: ${errorMessage(error)}`);
+      });
+      this.lockdown = { stamp, args };
+    }
+    return this.lockdown.args;
   }
 
   private exec(prompt: string, token: string, lockdown: string[], images: Attachment[], signal?: AbortSignal): Promise<string> {
@@ -141,25 +154,47 @@ export class CodexBrain implements Brain {
 }
 
 /**
- * Flags that switch off the user's MCP servers and Codex's built-in tools for t3c's runs, while
- * keeping the rest of their config (model provider, model, login).
+ * Flags that switch off Codex's built-in tools and every MCP server it would start (the user's
+ * own, and plugins') for t3c's runs, while keeping the rest of their config (model provider,
+ * model, login). Throws when that can't be guaranteed, so no run starts without it.
  */
-export async function lockdownArgs(codexBin: string, codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex")) {
+export async function lockdownArgs(codexBin: string, signal?: AbortSignal): Promise<string[]> {
+  const codex = async (...args: string[]) => (await promisify(execFile)(codexBin, args, { timeout: 60_000, signal })).stdout;
   const args = ["-c", "notify=[]"];
-  const configFile = join(codexHome, "config.toml");
-  if (existsSync(configFile)) {
-    const names = new Set([...readFileSync(configFile, "utf8").matchAll(/^\[mcp_servers\.("[^"]+"|[^\].]+)\]/gm)].map((m) => m[1]));
-    names.delete("t3c");
-    for (const name of names) args.push("-c", `mcp_servers.${name}.enabled=false`);
-  }
   try {
-    const { stdout } = await promisify(execFile)(codexBin, ["features", "list"]);
-    const known = new Set(stdout.split("\n").map((line) => line.split(/\s+/)[0]));
+    const known = new Set((await codex("features", "list")).split("\n").map((line) => line.split(/\s+/)[0]));
     for (const feature of FEATURES_OFF) if (known.has(feature)) args.push("--disable", feature);
   } catch {
     // Older Codex without `features list`: the sandbox and MCP lockdown still apply.
   }
+  // Codex says which servers it would start, however they're configured (tables, inline tables,
+  // plugins), rather than t3c guessing from config.toml.
+  const servers = async () => {
+    try {
+      return JSON.parse(await codex("mcp", "list", "--json", ...args)) as { name: string; enabled: boolean }[];
+    } catch (error) {
+      throw new Error(`\`codex mcp list --json\` failed (update Codex if it's old): ${lastLine((error as { stderr?: string }).stderr ?? "") || errorMessage(error)}`);
+    }
+  };
+  for (const { name, enabled } of await servers()) {
+    if (!enabled || name === "t3c") continue;
+    // Codex keeps a quoted key's quotes as part of the name, so only bare keys can turn a server off.
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error(`can't turn off the Codex MCP server "${name}" for t3c's runs; give it a name of letters, digits, - and _`);
+    args.push("-c", `mcp_servers.${name}.enabled=false`);
+  }
+  // Checked, not assumed: a run never starts with any server but t3c's.
+  const left = (await servers()).filter((s) => s.enabled && s.name !== "t3c").map((s) => s.name);
+  if (left.length > 0) throw new Error(`the Codex MCP servers ${left.join(", ")} stay on despite t3c's lockdown`);
   return args;
+}
+
+/** When Codex's config last changed: the lockdown is worked out again after it does. */
+function codexConfigStamp() {
+  try {
+    return String(statSync(join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "config.toml")).mtimeMs);
+  } catch {
+    return "none";
+  }
 }
 
 function extension(mimeType: string) {

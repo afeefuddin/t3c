@@ -2,8 +2,6 @@
 // A scripted Claude print-mode process. Real MCP calls exercise t3c's own authorization checks.
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const args = process.argv.slice(2);
 const mode = process.env.FAKE_CLAUDE_MODE ?? "route";
@@ -11,6 +9,9 @@ if (args.includes("--help")) {
   console.log(mode === "old" ? "--print --tools" : "--restricted --tools --strict-mcp-config --setting-sources --settings --permission-mode --permission-prompts --disable-slash-commands --no-chrome --no-session-persistence");
   process.exit(0);
 }
+// Loaded only for runs: `--help` (the capability check) answers without it.
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
 const value = (flag) => args[args.indexOf(flag) + 1];
 assert.equal(value("--tools"), "");
 assert.equal(value("--setting-sources"), "");

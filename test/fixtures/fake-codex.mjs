@@ -2,11 +2,27 @@
 // Stands in for `codex exec`: reads the t3c tool URL from -c flags and the token from the env var
 // Codex would use, then calls tools as a scripted agent. FAKE_CODEX_MODE picks the script.
 import { readFileSync, writeFileSync } from "node:fs";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const args = process.argv.slice(2);
 const config = args.flatMap((a, i) => (args[i - 1] === "-c" ? [a] : []));
+
+// What t3c's lockdown asks first: the features this Codex has, and the MCP servers it would start
+// (FAKE_CODEX_MCP: their names; FAKE_CODEX_STUCK: one that `enabled=false` doesn't turn off;
+// FAKE_CODEX_HANG: `mcp list` never answers, and this process writes its pid there).
+if (args[0] === "features") {
+  console.log("shell_tool  stable  true\nmemories  stable  true\nsomething_else  stable  true");
+  process.exit(0);
+}
+if (args[0] === "mcp" && process.env.FAKE_CODEX_HANG) {
+  writeFileSync(process.env.FAKE_CODEX_HANG, String(process.pid));
+  setInterval(() => {}, 1_000);
+  await new Promise(() => {});
+} else if (args[0] === "mcp") {
+  const names = JSON.parse(process.env.FAKE_CODEX_MCP ?? "[]");
+  const off = (name) => name !== process.env.FAKE_CODEX_STUCK && config.includes(`mcp_servers.${name}.enabled=false`);
+  console.log(JSON.stringify(names.map((name) => ({ name, enabled: !off(name) }))));
+  process.exit(0);
+}
 const url = JSON.parse(config.find((c) => c.startsWith("mcp_servers.t3c.url=")).split("=").slice(1).join("="));
 const tokenVar = JSON.parse(config.find((c) => c.startsWith("mcp_servers.t3c.bearer_token_env_var=")).split("=")[1]);
 const outFile = args[args.indexOf("-o") + 1];
@@ -25,6 +41,9 @@ if (mode === "crash") {
   process.exit(1);
 }
 
+// Loaded only for runs: the lockdown's questions above are answered without it.
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
 const client = new Client({ name: "fake-codex", version: "0" });
 await client.connect(
   new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: `Bearer ${process.env[tokenVar]}` } } }),
