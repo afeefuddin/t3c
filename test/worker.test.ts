@@ -373,6 +373,16 @@ test("messages sent in a burst, or while a run is busy, get one run and one repl
   assert.deepEqual(gateway.acks, ["a", "b", "c", "d"]); // each message still gets its 👀
 });
 
+test("the fixed rules start a thread with every message of a burst, not just the last", async () => {
+  const { t3, worker } = setup({ quietMs: 40 });
+  worker.enqueue(message({ eventKey: "a", text: "Fix login and add a regression test" }));
+  worker.enqueue(message({ eventKey: "b", text: "Only for Safari" }));
+  await worker.idle();
+
+  assert.equal(t3.launches.length, 1);
+  assert.match(t3.launches[0].message, /^Fix login and add a regression test\n\nOnly for Safari\n\nWork autonomously\./);
+});
+
 test("files shared in the conversation go to the thread, and later ones with the follow-up that brought them", async () => {
   const { t3, gateway, worker } = setup();
   const file = (name: string, mimeType = "image/png") => ({ name, mimeType, size: 3, url: `https://files/${name}` });

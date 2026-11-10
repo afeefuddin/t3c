@@ -77,7 +77,9 @@ export class SimpleBrain implements Brain {
     const project =
       projects.find((p) => p.name.toLowerCase() === named) ?? projects.find((p) => text.includes(p.name.toLowerCase())) ?? projects[0];
     const inbound = event.messages[0].inbound!;
-    const { label } = await tools.startThread({ project: project.name, title: inbound.title });
+    // The whole burst: one request is often sent in several messages.
+    const request = event.messages.map((m) => m.text).join("\n\n");
+    const { label } = await tools.startThread({ project: project.name, title: inbound.title, request });
     if (tools.canReply) await replyOrForward(tools, "On it! I'll post here when it's done 👀", label);
     return `started a thread in ${project.name}`;
   }

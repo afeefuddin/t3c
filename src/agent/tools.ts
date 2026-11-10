@@ -207,10 +207,10 @@ export class ConversationTools {
 
   /**
    * Starts a T3 thread for this conversation with the agent's `prompt`, written from the
-   * conversation. Without one (fixed rules), the request goes in word for word with the
-   * conversation fenced off as untrusted. Its answer will come back as an event.
+   * conversation. Without one (fixed rules), the `request` (by default the latest message) goes in
+   * word for word with the conversation fenced off as untrusted. Its answer will come back as an event.
    */
-  startThread(input: { project: string; title: string; prompt?: string; label?: string; worktree?: boolean }) {
+  startThread(input: { project: string; title: string; prompt?: string; request?: string; label?: string; worktree?: boolean }) {
     return this.record("start_thread", input, async () => {
       if (this.launches >= LIMITS.launches) throw new Error(`At most ${LIMITS.launches} threads per run.`);
       const projects = await this.allowedProjects();
@@ -238,7 +238,7 @@ export class ConversationTools {
         title: input.title,
         prompt: input.prompt
           ? threadPrompt(input.prompt, { instructions: preparation.instructions })
-          : threadPrompt(this.latestInbound().text, preparation),
+          : threadPrompt(input.request ?? this.latestInbound().text, preparation),
         worktree,
         attachments: await this.download(files.slice(-ATTACHMENT_LIMITS.perMessage)),
       });
