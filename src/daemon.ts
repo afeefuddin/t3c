@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isLoggedIn, t3Auth } from "./auth.ts";
 import { allowedProjects, type Config, home, loadConfig, needsFunnel, paths, t3McpUrl } from "./config.ts";
@@ -18,14 +18,27 @@ export const SHUTDOWN_GRACE_MS = 15_000;
 /** How long `t3c stop` waits for the service to exit before killing it. */
 const STOP_TIMEOUT_MS = SHUTDOWN_GRACE_MS + 10_000;
 
+/**
+ * The service's pid, if it's running. The pid file also records when that process started, so a
+ * pid reused by another process (after a reboot, say) is never mistaken for t3c, or signalled.
+ */
 export function runningPid(): number | undefined {
   if (!existsSync(paths.pid)) return;
-  const pid = Number(readFileSync(paths.pid, "utf8"));
+  const [recordedPid, recordedStart] = readFileSync(paths.pid, "utf8").split("\n");
+  const pid = Number(recordedPid);
+  const started = Number.isInteger(pid) && pid > 0 ? processInfo(pid, "lstart") : undefined;
+  // Pid files from before the start time was recorded: any `t3c serve` process counts.
+  const same = recordedStart ? started === recordedStart : started !== undefined && / serve$/.test(processInfo(pid, "command") ?? "");
+  if (same) return pid;
+  rmSync(paths.pid, { force: true });
+}
+
+/** A `ps` field of a running process (`lstart`: when it started; `command`: its command line). */
+function processInfo(pid: number, field: "lstart" | "command"): string | undefined {
   try {
-    process.kill(pid, 0);
-    return pid;
+    return execFileSync("ps", ["-o", `${field}=`, "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C" } }).trim() || undefined;
   } catch {
-    rmSync(paths.pid, { force: true });
+    return undefined; // no such process
   }
 }
 
@@ -46,7 +59,7 @@ export async function start(entry: string) {
     stdio: ["ignore", logFd, logFd],
   });
   closeSync(logFd);
-  writeFileSync(paths.pid, String(child.pid));
+  writeFileSync(paths.pid, `${child.pid}\n${processInfo(child.pid!, "lstart") ?? ""}`);
   child.unref();
 
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));

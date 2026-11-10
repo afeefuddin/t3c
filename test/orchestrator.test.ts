@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -94,7 +94,9 @@ test("terminal continues earlier chat work through the same agent and receives t
   // Exercise the actual terminal entrypoint against this same daemon, without a model subprocess.
   const home = mkdtempSync(join(tmpdir(), "t3c-terminal-"));
   writeFileSync(join(home, "config.json"), JSON.stringify({ port: (server.address() as AddressInfo).port, agent: { provider: "codex" } }));
-  writeFileSync(join(home, "t3c.pid"), String(process.pid));
+  // This process stands in for the running service: the pid file names it, with when it started.
+  const started = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" } }).trim();
+  writeFileSync(join(home, "t3c.pid"), `${process.pid}\n${started}`);
   writeFileSync(join(home, "chat-token"), token, { mode: 0o600 });
   writeFileSync(join(home, "chat-session"), "terminal-session");
   const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", new URL("../src/cli.ts", import.meta.url).pathname, "chat"], {
