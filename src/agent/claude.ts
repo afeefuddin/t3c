@@ -41,16 +41,16 @@ export class ClaudeBrain implements Brain {
     this.options = options;
   }
 
-  async handle(event: AgentEvent, tools: ConversationTools): Promise<string> {
+  async handle(event: AgentEvent, tools: ConversationTools, signal?: AbortSignal): Promise<string> {
     const skills = loadSkills(this.options.skillsDir);
     const token = this.options.toolServer.open(tools, skills);
     try {
       this.capabilities ??= checkClaudeCli(this.options.claudeBin);
       await this.capabilities;
       const { prompt, images } = await prepareAgentPrompt(event, tools, skills);
-      return await this.exec(prompt, token, images);
+      return await this.exec(prompt, token, images, signal);
     } catch (error) {
-      if (tools.acted) throw error;
+      if (tools.acted || signal?.aborted) throw error;
       log("agent", `claude failed before acting (${errorMessage(error)}); using the simple rules`, "warn");
       return `${await this.options.fallback.handle(event, tools)} (fallback)`;
     } finally {
@@ -58,7 +58,7 @@ export class ClaudeBrain implements Brain {
     }
   }
 
-  private exec(prompt: string, token: string, images: Attachment[]): Promise<string> {
+  private exec(prompt: string, token: string, images: Attachment[], signal?: AbortSignal): Promise<string> {
     const { workDir, toolsUrl, model, claudeBin = "claude", timeoutMs = 5 * 60_000 } = this.options;
     mkdirSync(workDir, { recursive: true, mode: 0o700 });
     const args = [
@@ -91,6 +91,7 @@ export class ClaudeBrain implements Brain {
           CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", ENABLE_TOOL_SEARCH: "false",
         },
         stdio: ["pipe", "pipe", "pipe"],
+        signal,
       });
       let stderr = "", buffer = "", result: { is_error?: boolean; result?: string; subtype?: string } | undefined;
       let initialized = false;

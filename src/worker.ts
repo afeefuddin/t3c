@@ -14,14 +14,19 @@ const MAX_ATTEMPTS = 3;
 const QUIET_MS = 4_000;
 /** …or after this long, if they keep typing. */
 const MAX_QUIET_WAIT_MS = 20_000;
+/** After a stop's grace period, how long stopped runs get to wind down. */
+const ABORT_WAIT_MS = 5_000;
+
+/** A run stopped by shutdown. Its messages and owed answer are handled again after the restart. */
+const INTERRUPTED = Symbol("interrupted");
 
 /**
  * Wakes the brain on events and keeps everything durable:
  * - a new message (saved by the webhook) → brain run
  * - a T3 thread finished answering → brain run, then the thread is settled if that's the end
  * - a T3 thread is waiting, failed or stuck (see `supervise`) → brain run to get it going again
- * Runs for the same conversation never overlap; after a restart, unprocessed messages and
- * owed answers resume.
+ * Runs for the same conversation never overlap; after a restart (or a `stop` that cut a run
+ * short), unprocessed messages and owed answers resume.
  */
 export class Worker {
   private readonly gateways: Map<string, Gateway>;
@@ -41,6 +46,13 @@ export class Worker {
   private readonly lastProgress = new Map<string, { items: number; since: number }>();
   /** Per thread: waiting/failed/stuck episodes in a row without progress. */
   private readonly attempts = new Map<string, number>();
+  /** Brain runs in progress. */
+  private readonly runs = new Set<Promise<unknown>>();
+  /** Per thread: an answer a watcher took (cleared as owed) that no run has handled yet, by when it was owed. */
+  private readonly taken = new Map<string, string>();
+  private stopping = false;
+  /** Cancels runs still going when a stop's grace period ends. */
+  private readonly abort = new AbortController();
   private readonly stallMs: number;
   private readonly quietMs: number;
 
@@ -97,7 +109,26 @@ export class Worker {
     return stored;
   }
 
-  /** Resolves once nothing is queued, running or being watched (for tests and shutdown). */
+  /**
+   * Starts no more runs and gives those in progress up to `graceMs` to finish, then cancels them.
+   * Nothing is lost: a cancelled run's messages and owed answers are picked up after the restart.
+   */
+  async stop(graceMs: number) {
+    this.stopping = true;
+    if (this.runs.size > 0) {
+      log("t3c", `letting ${this.runs.size} agent run(s) finish`);
+      if (!(await within(Promise.allSettled([...this.runs]), graceMs))) {
+        log("t3c", "stopping agent runs still going; they resume after the restart", "warn");
+        this.abort.abort();
+        await within(Promise.allSettled([...this.runs]), ABORT_WAIT_MS);
+      }
+    }
+    // Answers whose run was cut short, or never got its turn behind a run that ignored the abort:
+    // owe them again, so the watch after the restart picks them up.
+    for (const [id, since] of this.taken) if (this.store.getThread(id)?.awaitingSince === null) this.store.setAwaiting(id, since);
+  }
+
+  /** Resolves once nothing is queued, running or being watched (for tests). */
   async idle() {
     while (this.draining || this.pending.size > 0) {
       await this.draining;
@@ -115,7 +146,7 @@ export class Worker {
    * arrive can take them in itself (see ConversationTools.reply).
    */
   private async drain() {
-    for (let id = this.store.nextPending(); id; id = this.store.nextPending()) {
+    for (let id = this.store.nextPending(); id && !this.stopping; id = this.store.nextPending()) {
       const conversation = this.store.getConversation(id)!;
       if (!this.gateways.has(conversation.source)) {
         // e.g. a gateway removed from the config while messages from it were queued.
@@ -125,11 +156,14 @@ export class Worker {
         continue;
       }
       await this.locked(conversation.id, async () => {
+        if (this.stopping) return;
         const batch = this.store.takePending(conversation.id);
         if (batch.length === 0) return; // a run that held the lock took them
         this.store.updateConversation(conversation.id, { state: "active" });
         await this.untilQuiet(conversation.id, batch);
         const error = await this.run(conversation, { type: "message", messages: batch });
+        // Taken but not handled: they go back to the queue when t3c starts again.
+        if (error === INTERRUPTED) return;
         for (const m of batch) this.store.finishMessage(m.id, error);
       });
     }
@@ -151,21 +185,39 @@ export class Worker {
     await gateway.acknowledge?.(message).catch((e) => log(gateway.name, `couldn't react: ${errorMessage(e)}`, "warn"));
   }
 
-  /** One brain run with conversation-scoped tools, recorded in agent_runs. Returns an error message, if any. */
-  private async run(conversation: Conversation, event: AgentEvent): Promise<string | undefined> {
+  /**
+   * One brain run with conversation-scoped tools, recorded in agent_runs. Returns an error message
+   * if it failed, or INTERRUPTED when t3c is stopping and the run didn't get to finish.
+   */
+  private run(conversation: Conversation, event: AgentEvent): Promise<string | undefined | typeof INTERRUPTED> {
+    if (this.stopping) return Promise.resolve(INTERRUPTED);
+    const running = this.execute(conversation, event);
+    this.runs.add(running);
+    void running.finally(() => this.runs.delete(running));
+    return running;
+  }
+
+  private async execute(conversation: Conversation, event: AgentEvent): Promise<string | undefined | typeof INTERRUPTED> {
     const gateway = this.gateway(conversation.source);
     const requestFiles = event.type === "message" ? event.messages.flatMap((m) => m.inbound?.files ?? []) : [];
-    const tools = new ConversationTools({ store: this.store, dispatcher: this.dispatcher, t3: this.t3, gateway, conversation, requestFiles });
+    const signal = this.abort.signal;
+    const tools = new ConversationTools({ store: this.store, dispatcher: this.dispatcher, t3: this.t3, gateway, conversation, requestFiles, signal });
     const run = this.store.startRun(conversation.id, event.type);
     const brain = this.brain;
     try {
-      const outcome = await brain.handle(event, tools);
+      const outcome = await brain.handle(event, tools, signal);
       this.store.finishRun(run.id, { actions: tools.actions, outcome });
       for (const m of tools.lateMessages) this.store.finishMessage(m.id);
       log(conversation.source, `✓ ${brain.name}: ${outcome} (${conversation.externalId})`);
       return;
     } catch (error) {
       const message = errorMessage(error);
+      if (signal.aborted) {
+        // Its messages (late ones too) stay taken, and go back to the queue when t3c starts again.
+        this.store.finishRun(run.id, { actions: tools.actions, error: "Stopped: t3c was shutting down." });
+        log(conversation.source, `⏹ ${conversation.externalId}: stopped by shutdown; handled again after the restart`, "warn");
+        return INTERRUPTED;
+      }
       this.store.finishRun(run.id, { actions: tools.actions, error: message });
       for (const m of tools.lateMessages) this.store.finishMessage(m.id, message);
       log(conversation.source, `✗ ${conversation.externalId}: ${message}`, "error");
@@ -182,7 +234,7 @@ export class Worker {
 
   /** Waits for a thread's owed answer, then wakes the brain with it. Newer follow-ups extend the wait. */
   private watch(thread: ThreadRecord) {
-    if (this.watching.has(thread.id) || !thread.t3ThreadId) return;
+    if (this.stopping || this.watching.has(thread.id) || !thread.t3ThreadId) return;
     // Gateways without replies (http) have nowhere to post an answer; callers read it via /messages.
     const source = this.store.getConversation(thread.conversationId)?.source;
     if (!source || !this.gateways.get(source)?.reply) return;
@@ -194,6 +246,8 @@ export class Worker {
             const since = this.store.getThread(thread.id)?.awaitingSince;
             if (!since) return;
             const reply = await this.t3.waitForReply(thread.t3ThreadId!, since);
+            // Still owed: the watch resumes after the restart.
+            if (this.stopping) return;
             // Only the answer to the newest message counts; otherwise keep waiting.
             if (!this.store.clearAwaiting(thread.id, since)) continue;
             const conversation = this.store.getConversation(thread.conversationId)!;
@@ -205,12 +259,17 @@ export class Worker {
               await this.giveUp(conversation, current, `it is ${reply.status}`);
               return;
             }
-            await this.locked(conversation.id, () => {
+            this.taken.set(thread.id, since);
+            const result = await this.locked(conversation.id, async () => {
               // A run that held the lock may have sent it newer work: this answer is then out of date.
               current = this.store.getThread(thread.id)!;
               const newerWork = current.awaitingSince !== null;
-              return this.run(conversation, { type: "thread_finished", thread: current, reply, attempt, ...(newerWork && { newerWork }) });
+              const outcome = await this.run(conversation, { type: "thread_finished", thread: current, reply, attempt, ...(newerWork && { newerWork }) });
+              if (outcome !== INTERRUPTED) this.taken.delete(thread.id);
+              return outcome;
             });
+            // Not handled: stop() owes it again.
+            if (result === INTERRUPTED) return;
             // Done unless the brain sent it more work: settle it, so T3's active list holds what's live.
             // Threads t3c only attached to belong to whoever started them; they stay as they are.
             if (finished && current.origin === "started" && !this.store.getThread(thread.id)?.awaitingSince) await this.settle(current);
@@ -236,6 +295,7 @@ export class Worker {
     this.supervising = true;
     try {
       for (const thread of this.store.awaitingThreads()) {
+        if (this.stopping) return;
         // Resumes a wait that broke off, e.g. while T3 Code was restarting.
         this.watch(thread);
         try {
@@ -319,5 +379,16 @@ export class Worker {
     const gateway = this.gateways.get(name);
     if (!gateway) throw new Error(`No gateway "${name}" is configured.`);
     return gateway;
+  }
+}
+
+/** Whether `promise` settled within `ms`. */
+async function within(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), ms)));
+  try {
+    return await Promise.race([promise.then(() => true), timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }

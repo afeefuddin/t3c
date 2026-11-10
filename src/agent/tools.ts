@@ -21,6 +21,8 @@ export interface ToolContext {
   conversation: Conversation;
   /** Files sent with the messages this run handles; they go to whichever thread gets the work. */
   requestFiles?: FileRef[];
+  /** Aborted when t3c stops the run (shutting down): from then on every tool call fails. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -421,6 +423,7 @@ export class ConversationTools {
 
   private async record<T>(tool: string, input: unknown, fn: () => T | Promise<T>): Promise<Awaited<T>> {
     try {
+      this.ctx.signal?.throwIfAborted();
       const result = await fn();
       this.actions.push({ tool, input, result: summarize(result) });
       return result;

@@ -13,6 +13,11 @@ import { say } from "./ui.ts";
 
 /** The background service: `t3c start` runs `t3c serve` detached, logging to ~/.t3c/t3c.log. */
 
+/** How long a stopping service lets agent runs in progress finish before it stops them. */
+export const SHUTDOWN_GRACE_MS = 15_000;
+/** How long `t3c stop` waits for the service to exit before killing it. */
+const STOP_TIMEOUT_MS = SHUTDOWN_GRACE_MS + 10_000;
+
 export function runningPid(): number | undefined {
   if (!existsSync(paths.pid)) return;
   const pid = Number(readFileSync(paths.pid, "utf8"));
@@ -72,7 +77,16 @@ export async function stop({ keepFunnel = false } = {}) {
   if (!pid) say.info("t3c isn't running.");
   else {
     process.kill(pid, "SIGTERM");
-    for (let i = 0; i < 50 && runningPid(); i++) await sleep(100);
+    // It lets agent runs in progress finish first (see SHUTDOWN_GRACE_MS).
+    const signalled = Date.now();
+    let told = false;
+    while (runningPid() && Date.now() - signalled < STOP_TIMEOUT_MS) {
+      if (!told && Date.now() - signalled > 1_000) {
+        say.info("Letting work in progress finish…");
+        told = true;
+      }
+      await sleep(100);
+    }
     if (runningPid()) process.kill(pid, "SIGKILL");
     rmSync(paths.pid, { force: true });
     say.ok(`Stopped t3c (pid ${pid}).`);

@@ -5,7 +5,7 @@ import { overriddenSkills } from "./agent/skills.ts";
 import { isLoggedIn, t3Auth } from "./auth.ts";
 import { type Brain, SimpleBrain } from "./brain.ts";
 import { allowedProjects, loadConfig, paths } from "./config.ts";
-import { describeGateways, runningPid } from "./daemon.ts";
+import { describeGateways, runningPid, SHUTDOWN_GRACE_MS } from "./daemon.ts";
 import { Dispatcher } from "./dispatch.ts";
 import type { Gateway } from "./gateway.ts";
 import { httpGateway } from "./gateways/http.ts";
@@ -71,9 +71,9 @@ export async function serve() {
   worker.start();
   // Webhooks get lost sometimes, and none arrive while this machine sleeps.
   void worker.catchUp();
-  setInterval(() => void worker.catchUp(), CATCH_UP_INTERVAL_MS);
+  const catchUp = setInterval(() => void worker.catchUp(), CATCH_UP_INTERVAL_MS);
   // Checks running threads for ones that are stuck.
-  setInterval(() => void worker.supervise(), SUPERVISE_INTERVAL_MS);
+  const supervise = setInterval(() => void worker.supervise(), SUPERVISE_INTERVAL_MS);
 
   // Never bind publicly: the internet reaches t3c only through Tailscale Funnel, and only /hooks.
   const httpApi = config.http?.public
@@ -96,15 +96,25 @@ export async function serve() {
     process.exit(1);
   });
 
-  const shutdown = (signal: string) => {
+  // Agent runs in progress get to finish (they still need the server for their tools); whatever
+  // doesn't finish in time is stopped, and handled again after the restart. A second signal quits.
+  let stopping = false;
+  const shutdown = async (signal: string) => {
+    if (stopping) process.exit(1);
+    stopping = true;
     log("t3c", `${signal}: stopping`);
+    clearInterval(catchUp);
+    clearInterval(supervise);
+    await worker.stop(SHUTDOWN_GRACE_MS);
     server.close();
-    void t3.close().finally(() => process.exit(0));
+    await t3.close().catch(() => {});
+    process.exit(0);
   };
-  process.once("SIGTERM", () => shutdown("SIGTERM"));
-  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
   if (runningPid() !== process.pid) log("t3c", "running in the foreground; Ctrl-C to stop");
 }
+
 
 /**
  * A connection's projects, read from the saved config for each message so `t3c projects` applies

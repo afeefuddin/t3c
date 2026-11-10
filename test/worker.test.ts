@@ -104,6 +104,102 @@ test("failures are reported back to the conversation and recorded", async () => 
   assert.equal(store.runs(stored.conversationId)[0].status, "failed");
 });
 
+/** A brain whose runs for `blocks` events last until t3c stops them; the rest follow the fixed rules. */
+function stoppableBrain(blocks: AgentEvent["type"]) {
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => (started = resolve));
+  const simple = new SimpleBrain();
+  const brain: Brain = {
+    name: "slow",
+    async handle(event, tools, signal) {
+      if (event.type !== blocks) return simple.handle(event, tools);
+      started();
+      await new Promise((_, reject) => signal!.addEventListener("abort", () => reject(signal!.reason)));
+      return "unreachable";
+    },
+  };
+  return { brain, running };
+}
+
+test("stopping lets runs finish, and one cut short is handled again after the restart", async () => {
+  const store = new Store(":memory:");
+  const quick = setup({ store });
+  quick.worker.enqueue(message({ eventKey: "quick", conversationId: "quick" }));
+  await new Promise((resolve) => setImmediate(resolve)); // its run has started
+  await quick.worker.stop(5_000);
+  assert.equal(store.findDelivery("chat", "quick")?.status, "done");
+
+  const { brain, running } = stoppableBrain("message");
+  const first = setup({ store, brain });
+  const stored = first.worker.enqueue(message())!;
+  await running;
+  await first.worker.stop(10);
+  // Not failed, nothing posted: it's still to be handled.
+  assert.equal(store.getMessage(stored.id)?.status, "processing");
+  assert.deepEqual(first.gateway.replies, []);
+  assert.match(store.runs(stored.conversationId)[0].error ?? "", /shutting down/);
+
+  const second = setup({ store });
+  second.worker.start();
+  await second.worker.idle();
+  assert.equal(second.t3.launches.length, 1);
+  assert.equal(store.getMessage(stored.id)?.status, "done");
+});
+
+test("a thread's answer that a stop cut short is owed again, and posted after the restart", async () => {
+  const store = new Store(":memory:");
+  const { brain, running } = stoppableBrain("thread_finished");
+  const first = setup({ store, brain });
+  const stored = first.worker.enqueue(message())!;
+  await running;
+  await first.worker.stop(10);
+  const [thread] = store.threads(stored.conversationId);
+  assert.notEqual(thread.awaitingSince, null);
+  assert.deepEqual(answers(first.gateway), []);
+
+  const second = setup({ store });
+  second.worker.start();
+  await second.worker.idle();
+  assert.deepEqual(answers(second.gateway).map((r) => r.text), ["**Done** in t1"]);
+});
+
+test("an answer waiting behind a run that ignores the stop is still owed after it", async () => {
+  // The second message's run hangs (say, on a subprocess) and doesn't stop when told to.
+  let release!: () => void;
+  const hung = new Promise<void>((resolve) => (release = resolve));
+  const simple = new SimpleBrain();
+  let messages = 0;
+  const brain: Brain = {
+    name: "hung",
+    async handle(event, tools) {
+      if (event.type !== "message" || ++messages === 1) return simple.handle(event, tools);
+      await hung;
+      return "finished late";
+    },
+  };
+  const store = new Store(":memory:");
+  const { t3, worker } = setup({ store, brain });
+  let answer!: () => void;
+  t3.gate = new Promise((resolve) => (answer = resolve));
+  const until = async (done: () => boolean) => {
+    while (!done()) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  const stored = worker.enqueue(message())!;
+  await until(() => store.threads(stored.conversationId)[0]?.awaitingSince != null);
+  worker.enqueue(message({ eventKey: "e2", text: "also the signup page" }));
+  await until(() => messages === 2);
+  // The thread answers: its watcher takes the answer, then waits for the hung run's turn to end.
+  answer();
+  await until(() => store.threads(stored.conversationId)[0].awaitingSince === null);
+
+  await worker.stop(10);
+  assert.notEqual(store.threads(stored.conversationId)[0].awaitingSince, null);
+  release();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.notEqual(store.threads(stored.conversationId)[0].awaitingSince, null);
+});
+
 test("after a restart, interrupted messages and owed answers resume", async () => {
   const store = new Store(":memory:");
   // A previous process launched a thread in conv-9 and was still waiting for its answer…

@@ -61,15 +61,15 @@ export class CodexBrain implements Brain {
     this.options = options;
   }
 
-  async handle(event: AgentEvent, tools: ConversationTools): Promise<string> {
+  async handle(event: AgentEvent, tools: ConversationTools, signal?: AbortSignal): Promise<string> {
     const skills = loadSkills(this.options.skillsDir);
     const token = this.options.toolServer.open(tools, skills);
     try {
       const { prompt, images } = await prepareAgentPrompt(event, tools, skills);
       this.lockdown ??= lockdownArgs(this.options.codexBin ?? "codex");
-      return await this.exec(prompt, token, await this.lockdown, images);
+      return await this.exec(prompt, token, await this.lockdown, images, signal);
     } catch (error) {
-      if (tools.acted) throw error;
+      if (tools.acted || signal?.aborted) throw error;
       log("agent", `codex failed before acting (${errorMessage(error)}); using the simple rules`, "warn");
       return `${await this.options.fallback.handle(event, tools)} (fallback)`;
     } finally {
@@ -77,7 +77,7 @@ export class CodexBrain implements Brain {
     }
   }
 
-  private exec(prompt: string, token: string, lockdown: string[], images: Attachment[] = []): Promise<string> {
+  private exec(prompt: string, token: string, lockdown: string[], images: Attachment[], signal?: AbortSignal): Promise<string> {
     const { workDir, toolsUrl, model, codexBin = "codex", timeoutMs = 5 * 60_000 } = this.options;
     mkdirSync(workDir, { recursive: true });
     const outFile = join(workDir, `last-${token.slice(0, 8)}.txt`);
@@ -117,6 +117,7 @@ export class CodexBrain implements Brain {
       const child = spawn(codexBin, args, {
         env: { ...process.env, T3C_AGENT_TOKEN: token },
         stdio: ["ignore", "ignore", "pipe"],
+        signal,
       });
       let stderr = "";
       child.stderr.on("data", (chunk) => (stderr = (stderr + chunk).slice(-4_000)));

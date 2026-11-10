@@ -27,11 +27,12 @@ export function unblockMessage(event: Extract<AgentEvent, { type: "thread_finish
 
 /**
  * Decides what to do about an event, acting only through the conversation's tools.
- * Returns a one-line outcome for the log.
+ * Returns a one-line outcome for the log. When `signal` aborts (t3c is stopping), it stops and
+ * throws without falling back to anything: the event is handled again after the restart.
  */
 export interface Brain {
   readonly name: string;
-  handle(event: AgentEvent, tools: ConversationTools): Promise<string>;
+  handle(event: AgentEvent, tools: ConversationTools, signal?: AbortSignal): Promise<string>;
 }
 
 /**
