@@ -100,8 +100,11 @@ test("failures are reported back to the conversation and recorded", async () => 
   await worker.idle();
   assert.equal(t3.launches.length, 0);
   assert.equal(store.getMessage(stored.id)?.status, "failed");
-  assert.match(gateway.replies[0].text, /Something went wrong: issue not found/);
+  // Chats get a plain apology; the details (internal output) stay in the log and the run record.
+  assert.match(gateway.replies[0].text, /^Sorry, something went wrong/);
+  assert.doesNotMatch(gateway.replies[0].text, /issue not found/);
   assert.equal(store.runs(stored.conversationId)[0].status, "failed");
+  assert.equal(store.runs(stored.conversationId)[0].error, "issue not found");
 });
 
 /** A brain whose runs for `blocks` events last until t3c stops them; the rest follow the fixed rules. */

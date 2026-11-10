@@ -20,6 +20,9 @@ const ABORT_WAIT_MS = 5_000;
 /** A run stopped by shutdown. Its messages and owed answer are handled again after the restart. */
 const INTERRUPTED = Symbol("interrupted");
 
+/** What a chat sees when a run fails before replying. */
+const FAILURE_REPLY = "Sorry, something went wrong on my side and I couldn't get to that. Try again in a bit.";
+
 /**
  * Wakes the brain on events and keeps everything durable:
  * - a new message (saved by the webhook) → brain run
@@ -221,9 +224,11 @@ export class Worker {
       this.store.finishRun(run.id, { actions: tools.actions, error: message });
       for (const m of tools.lateMessages) this.store.finishMessage(m.id, message);
       log(conversation.source, `✗ ${conversation.externalId}: ${message}`, "error");
+      // The details are in the log: errors can hold internal output (agent stderr, T3's errors),
+      // and chats may be seen by people who shouldn't read that.
       if (tools.repliesSent === 0 && gateway.reply) {
         await gateway
-          .reply(conversation.externalId, `Something went wrong: ${message}`)
+          .reply(conversation.externalId, FAILURE_REPLY)
           .catch((e) => log(gateway.name, `✗ couldn't post the error: ${errorMessage(e)}`, "error"));
       }
       return message;
