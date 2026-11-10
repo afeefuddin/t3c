@@ -33,7 +33,7 @@ ${color("bold", "Set up")}
   t3c agent off                  back to fixed rules
 
 ${color("bold", "Run")}
-  t3c                           chat with the agent (continues your terminal conversation)
+  t3c                           chat with the agent (a new conversation each time)
   t3c chat                      open terminal chat explicitly
   t3c start | stop | restart     the background service
   t3c status                     what's running and connected

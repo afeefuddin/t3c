@@ -54,7 +54,6 @@ export const paths = {
   skills: join(home, "skills"),
   agentWork: join(home, "agent"),
   chatToken: join(home, "chat-token"),
-  chatSession: join(home, "chat-session"),
   instinct: join(home, "instinct.md"),
 };
 

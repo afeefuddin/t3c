@@ -64,10 +64,11 @@ To let Codex or Claude choose projects and handle follow-ups, install and log in
 its CLI, then run `t3c agent codex` or `t3c agent claude`.
 Use `t3c agent off` to disable routing.
 
-Run `t3c` to open a persistent terminal chat with that same agent. Ask what happened to work
-you started in Slack, continue it from your computer, or start something new. Replies return
-to the interface you're currently using. `/new` starts a fresh terminal chat; `/exit` leaves
-the chat while work continues in the background. The terminal reconnects to the same daemon.
+Run `t3c` to open a terminal chat with that same agent. Each run starts a new conversation;
+the agent can still find earlier ones, so ask what happened to work you started in Slack or an
+earlier chat, continue it from your computer, or start something new. Replies return to the
+interface you're currently using. `/new` starts another fresh chat; `/exit` leaves the chat
+while work continues in the background.
 The terminal shows a scrollable conversation and live activity with elapsed time. Enter sends;
 Alt+Enter inserts a newline. `/help` lists the controls. If a send is unconfirmed, `/retry` reuses
 its delivery key without duplicating work.

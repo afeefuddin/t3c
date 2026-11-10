@@ -141,27 +141,22 @@ export class ChatSession {
   }
 }
 
+/** Every launch, and every /new, is a fresh conversation; earlier ones stay searchable by the agent. */
 export async function terminalChat() {
-  let sessionId: string;
-  try { sessionId = readFileSync(paths.chatSession, "utf8").trim() || randomUUID(); } catch { sessionId = randomUUID(); }
   const token = chatToken();
   const config = loadConfig();
-  const makeClient = () => {
-    writeFileSync(paths.chatSession, sessionId, { mode: 0o600 });
-    return new ChatClient(`http://127.0.0.1:${config.port}`, token, sessionId);
-  };
-  const client = makeClient();
+  const newClient = () => new ChatClient(`http://127.0.0.1:${config.port}`, token, randomUUID());
+  const client = newClient();
   // Fail before switching terminal modes when the daemon is unavailable/outdated.
   const initial = await client.snapshot();
-  const nextClient = () => { sessionId = randomUUID(); return makeClient(); };
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return plainChat(client, initial, nextClient);
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return plainChat(client, initial, newClient);
 
   const { ChatView } = await import("./terminal-view.ts");
   const { ProcessTerminal } = await import("@earendil-works/pi-tui");
   let close!: () => void;
   const done = new Promise<void>((resolve) => { close = resolve; });
   const view = new ChatView(new ProcessTerminal(), (text) => { void session.submit(text); }, close, config.agent?.provider ?? "Agent");
-  const session = new ChatSession(client, view, nextClient, close, initial);
+  const session = new ChatSession(client, view, newClient, close, initial);
   view.update(initial);
   view.start();
   let lastPoll = 0;
@@ -178,7 +173,7 @@ export async function terminalChat() {
     session.stop();
     view.stop();
   }
-  console.log("Chat closed. Work continues in the background. Run t3c to return.");
+  console.log("Chat closed. Work continues in the background; ask about it from a new `t3c` chat.");
 }
 
 /** Readable line mode for pipes and terminals without a TTY. No cursor-control sequences. */
