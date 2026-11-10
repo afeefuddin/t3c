@@ -36,9 +36,9 @@ export async function serve() {
   if (config.http) gateways.push(httpGateway(config.http.secret, { projects: httpProjects, requireIdempotencyKey: config.http.public }));
   if (config.slack) {
     const slack = new SlackGateway(config.slack, { store, projects: savedProjects("slack") });
-    // Slack being unreachable (offline, an outage) mustn't take terminal chat and Instinct down with
-    // it: catch-up keeps trying, and recovers the messages sent meanwhile once it gets through.
-    await slack.init().catch((e) => log("slack", `can't reach Slack yet (${errorMessage(e)}); retrying in the background`, "warn"));
+    // Slack being unreachable or slow (offline, an outage) mustn't hold up or take down terminal chat
+    // and Instinct: webhooks get a 503 until it connects, and catch-up recovers what was sent meanwhile.
+    void slack.init().catch((e) => log("slack", `can't reach Slack yet (${errorMessage(e)}); retrying in the background`, "warn"));
     gateways.push(slack);
   }
 

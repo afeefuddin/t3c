@@ -64,8 +64,10 @@ export async function start(entry: string) {
 
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   if (!(await waitForHealth(config.port, child.pid!, exited))) {
+    // Still starting but not answering: stop it, or it lives on where `status` and `stop` can't see it.
+    if (runningPid()) await stop({ keepFunnel: true });
     rmSync(paths.pid, { force: true });
-    say.warn("t3c stopped right after starting. Last log lines:");
+    say.warn("t3c didn't start. Last log lines:");
     console.log(tail(15));
     process.exitCode = 1;
     return;
