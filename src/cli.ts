@@ -2,34 +2,20 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
-import { CodexBrain } from "./agent/codex.ts";
-import { ClaudeBrain, checkClaudeCli } from "./agent/claude.ts";
-import { AgentToolServer } from "./agent/mcp.ts";
-import { overriddenSkills } from "./agent/skills.ts";
+// Keep these imports light so `t3c` opens chat at once. The MCP SDK, the agents and the
+// service load only in the commands that need them (`./t3.ts`, `./setup.ts`, `./serve.ts`).
 import { isLoggedIn, t3Auth } from "./auth.ts";
-import { allowedProjects, loadConfig, paths, saveConfig, VERSION } from "./config.ts";
-import { type Brain, SimpleBrain } from "./brain.ts";
-import { describeGateways, logs, runningPid, start, status, stop } from "./daemon.ts";
+import { loadConfig, paths, saveConfig, VERSION } from "./config.ts";
+import { logs, runningPid, start, status, stop } from "./daemon.ts";
 import { Dispatcher } from "./dispatch.ts";
-import type { Gateway } from "./gateway.ts";
-import { httpGateway } from "./gateways/http.ts";
-import { SlackGateway } from "./gateways/slack.ts";
-import { HttpApi } from "./http-api.ts";
-import { editProjects, findConnection, showProjects } from "./projects.ts";
-import { color, errorMessage, log, preview } from "./log.ts";
-import { createApp } from "./server.ts";
-import { funnelBaseUrl, funnelProblem } from "./tailscale.ts";
-import { addHttp, addInstinct, addSlack, applyChanges, chooseModel, remove } from "./setup.ts";
+import { color, errorMessage, preview } from "./log.ts";
+import { funnelProblem } from "./tailscale.ts";
 import { Store } from "./store.ts";
-import { RUNTIME_MODES, type RuntimeMode, T3Client } from "./t3.ts";
+import type { RuntimeMode } from "./t3.ts";
 import { confirm, say } from "./ui.ts";
-import { Worker } from "./worker.ts";
-import { chatToken, terminalChat } from "./terminal.ts";
+import { terminalChat } from "./terminal.ts";
 
-/** How often followed conversations are checked for messages that never arrived as webhooks. */
-const CATCH_UP_INTERVAL_MS = 20_000;
-/** How often running T3 threads are checked for being stuck. */
-const SUPERVISE_INTERVAL_MS = 2 * 60_000;
+const setupCommands = () => import("./setup.ts");
 
 const USAGE = `${color("bold", "t3c")} — start T3 Code threads from Slack, Instinct and webhooks
 
@@ -98,15 +84,18 @@ try {
       say.info("Next: `t3c add slack` or `t3c add instinct`.");
       break;
 
-    case "add":
+    case "add": {
+      const { addHttp, addInstinct, addSlack } = await setupCommands();
       if (rest[0] === "slack") await addSlack();
       else if (rest[0] === "http") await addHttp();
       else if (rest[0] === "instinct") await addInstinct();
       else throw new Error("Usage: t3c add slack | http | instinct");
       break;
+    }
 
     case "mode": {
       const mode = rest[0] as RuntimeMode | undefined;
+      const { RUNTIME_MODES } = await import("./t3.ts");
       if (!mode) {
         say.info(`Threads run as ${loadConfig().runtimeMode}. Change it with \`t3c mode <${RUNTIME_MODES.join("|")}>\`.`);
         break;
@@ -116,21 +105,23 @@ try {
       say.ok(`Threads started by t3c will run as ${mode}.`);
       if (mode === "full-access") say.warn("Full access: an agent started through t3c can run any command on this machine without asking.");
       say.hint("t3c logs in to T3 again by itself for the new mode.");
-      await applyChanges();
+      await (await setupCommands()).applyChanges();
       break;
     }
 
-    case "model":
+    case "model": {
+      const { applyChanges, chooseModel } = await setupCommands();
       await chooseModel();
       await applyChanges();
       break;
+    }
 
     case "agent":
       await agent(rest[0], values.model);
       break;
 
     case "remove":
-      await remove(rest[0] ?? "", rest[1]);
+      await (await setupCommands()).remove(rest[0] ?? "", rest[1]);
       break;
 
     case "start":
@@ -159,11 +150,13 @@ try {
       break;
 
     case "serve":
-      await serve();
+      await (await import("./serve.ts")).serve();
       break;
 
     case "projects": {
+      const { editProjects, findConnection, showProjects } = await import("./projects.ts");
       if (rest[0]) findConnection(loadConfig(), rest[0]); // a missing connection says so before T3 is asked
+      const { T3Client } = await import("./t3.ts");
       const t3 = await T3Client.connect(t3Auth()).catch((e) => {
         throw new Error(`Couldn't reach T3 Code (${errorMessage(e)}). Open it and try again.`);
       });
@@ -176,6 +169,7 @@ try {
     case "run": {
       const prompt = rest.join(" ");
       if (!prompt || !values.project) throw new Error('Usage: t3c run "<prompt>" --project <project>');
+      const { T3Client } = await import("./t3.ts");
       const t3 = await T3Client.connect(t3Auth());
       const store = new Store(paths.state);
       const title = values.title ?? prompt.slice(0, 60);
@@ -221,7 +215,7 @@ async function login() {
   say.info("Approving t3c with a one-time pairing code from the `t3` CLI…");
   await t3Auth().login();
   say.ok("Connected to T3 Code.");
-  if (!loadConfig().model) await chooseModel();
+  if (!loadConfig().model) await (await setupCommands()).chooseModel();
 }
 
 /** `t3c setup`: everything a first run needs, skipping what's already done, then starts t3c. */
@@ -239,7 +233,7 @@ async function setup() {
     saveConfig({ ...config, agent: { provider: "codex" } });
     say.ok("Codex decides what to do with messages.");
   }
-  await addSlack(); // ends by starting (or restarting) t3c
+  await (await setupCommands()).addSlack(); // ends by starting (or restarting) t3c
 }
 
 /** Everything setup needs that isn't there, all at once, so nothing stops it halfway. */
@@ -306,86 +300,6 @@ function showMessages(limit: number) {
   }
 }
 
-/** The service itself; `t3c start` runs this in the background. */
-async function serve() {
-  const config = loadConfig();
-  if (!isLoggedIn(paths.auth)) throw new Error("Not connected to T3 Code. Run `t3c login` first.");
-  const store = new Store(paths.state);
-
-  const localChatToken = chatToken();
-  const gateways: Gateway[] = [httpGateway(localChatToken, { source: "cli", projects: ["*"], requireIdempotencyKey: true })];
-  const httpProjects = savedProjects("http");
-  if (config.http) gateways.push(httpGateway(config.http.secret, { projects: httpProjects, requireIdempotencyKey: config.http.public }));
-  if (config.slack) {
-    const slack = new SlackGateway(config.slack, { store, projects: savedProjects("slack") });
-    await slack.init();
-    gateways.push(slack);
-  }
-  if (gateways.length === 0) throw new Error("No gateways configured. Run `t3c add slack`, `t3c add http` or `t3c add instinct` first.");
-
-  if (config.runtimeMode === "full-access") {
-    log("t3c", "runtimeMode is full-access: chat messages can run any command on this machine", "warn");
-  }
-  // T3 Code may start after t3c or restart while it runs; the client connects whenever it's back.
-  const t3 = T3Client.lazy(t3Auth());
-  const projects = await t3.listProjects().catch((e) => {
-    log("t3c", `T3 Code isn't reachable yet (${errorMessage(e)}); t3c connects once it is`, "warn");
-    return [];
-  });
-  const agentTools = new AgentToolServer();
-  const simple = new SimpleBrain();
-  let brain: Brain = simple;
-  if (config.agent) {
-    const options = {
-      toolServer: agentTools,
-      toolsUrl: `http://127.0.0.1:${config.port}/agent/mcp`,
-      skillsDir: paths.skills,
-      workDir: paths.agentWork,
-      model: config.agent.model,
-      fallback: simple,
-    };
-    brain = config.agent.provider === "claude" ? new ClaudeBrain(options) : new CodexBrain(options);
-  }
-  if (config.agent) {
-    const replaced = overriddenSkills(paths.skills);
-    if (replaced.length > 0) log("agent", `your ${replaced.join(", ")} in ${paths.skills} replace the built-in skills of that name`, "warn");
-  }
-  const worker = new Worker({ gateways, dispatcher: new Dispatcher(t3, store, config), store, t3, brain });
-  worker.start();
-  // Webhooks get lost sometimes, and none arrive while this machine sleeps.
-  void worker.catchUp();
-  setInterval(() => void worker.catchUp(), CATCH_UP_INTERVAL_MS);
-  // Checks running threads for ones that are stuck.
-  setInterval(() => void worker.supervise(), SUPERVISE_INTERVAL_MS);
-
-  // Never bind publicly: the internet reaches t3c only through Tailscale Funnel, and only /hooks.
-  const httpApi = config.http?.public
-    ? new HttpApi({
-        secret: config.http.secret, projects: httpProjects, store, t3,
-        publicUrl: config.http.publicUrl ?? await funnelBaseUrl(),
-      })
-    : undefined;
-  const server = createApp({ gateways, worker, store, secret: config.http?.secret, agentTools, httpApi, chatSecret: localChatToken });
-  server.listen(config.port, "127.0.0.1", () => {
-    log("t3c", `listening on 127.0.0.1:${config.port}; threads run as ${config.runtimeMode}; brain: ${brain.name}`, "ok");
-    for (const line of describeGateways(config, projects)) log("t3c", line);
-  });
-  server.on("error", (error) => {
-    log("t3c", `can't listen on port ${config.port}: ${errorMessage(error)}`, "error");
-    process.exit(1);
-  });
-
-  const shutdown = (signal: string) => {
-    log("t3c", `${signal}: stopping`);
-    server.close();
-    void t3.close().finally(() => process.exit(0));
-  };
-  process.once("SIGTERM", () => shutdown("SIGTERM"));
-  process.once("SIGINT", () => shutdown("SIGINT"));
-  if (runningPid() !== process.pid) log("t3c", "running in the foreground; Ctrl-C to stop");
-}
-
-
 /** `t3c agent codex|claude|off`: switches the brain. */
 async function agent(provider: string | undefined, model?: string) {
   const config = loadConfig();
@@ -393,11 +307,11 @@ async function agent(provider: string | undefined, model?: string) {
     delete config.agent;
     saveConfig(config);
     say.ok("Agent off: messages follow the fixed rules (the configured project, follow-ups to the latest thread).");
-    await applyChanges();
+    await (await setupCommands()).applyChanges();
   } else if (provider === "codex" || provider === "claude") {
     if (provider === "codex" && !codexReady()) throw new Error("Codex isn't installed or logged in. Install it and run `codex login`.");
     if (provider === "claude") {
-      await checkClaudeCli();
+      await (await import("./agent/claude.ts")).checkClaudeCli();
       try {
         const auth = JSON.parse(execFileSync("claude", ["auth", "status"], { encoding: "utf8", timeout: 10_000 }));
         if (!auth.loggedIn) throw new Error("not logged in");
@@ -411,24 +325,9 @@ async function agent(provider: string | undefined, model?: string) {
     say.ok(`${name} now decides what to do with messages${model ? ` (model ${model})` : ""}.`);
     say.info(`Skills: add <name>/SKILL.md folders to ${paths.skills}; one named like a built-in skill replaces it.`);
     say.hint(`If ${name} fails before acting, t3c falls back to the fixed rules.`);
-    await applyChanges();
+    await (await setupCommands()).applyChanges();
   } else {
     say.info(config.agent ? `Agent: ${config.agent.provider}${config.agent.model ? ` (${config.agent.model})` : ""}` : "Agent: off (fixed rules)");
     say.hint("t3c agent codex|claude [--model <m>] | t3c agent off");
   }
-}
-
-/**
- * A connection's projects, read from the saved config for each message so `t3c projects` applies
- * at once. A config that can't be read allows nothing rather than everything.
- */
-function savedProjects(kind: "slack" | "http"): () => string[] {
-  return () => {
-    try {
-      return allowedProjects(loadConfig(), kind);
-    } catch (error) {
-      log("t3c", `can't read ${paths.config} (${errorMessage(error)}); ${kind} may use no projects until it's fixed`, "error");
-      return [];
-    }
-  };
 }

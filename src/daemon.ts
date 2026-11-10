@@ -7,7 +7,7 @@ import { slackApi } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
 import { describeAllowed, normalize } from "./projects.ts";
 import { Store } from "./store.ts";
-import { type Project, T3Client } from "./t3.ts";
+import type { Project } from "./t3.ts";
 import { disableFunnel, enableFunnel, funnelBaseUrl } from "./tailscale.ts";
 import { say } from "./ui.ts";
 
@@ -90,6 +90,7 @@ export async function status() {
   if (!isLoggedIn(paths.auth)) say.warn("T3 Code: not logged in — `t3c login`");
   else {
     await check(`T3 Code at ${t3McpUrl()}`, async () => {
+      const { T3Client } = await import("./t3.ts");
       const t3 = await T3Client.connect(t3Auth());
       try {
         projects = await t3.listProjects();
