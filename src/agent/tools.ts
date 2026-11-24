@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { Dispatcher } from "../dispatch.ts";
 import type { FileRef, Gateway, InboundMessage, Preparation, Worktree } from "../gateway.ts";
 import { errorMessage, log } from "../log.ts";
 import type { AgentRun, Conversation, Store, StoredMessage, ThreadRecord } from "../store.ts";
-import { ATTACHMENT_LIMITS, type Attachment, attachmentType, type T3 } from "../t3.ts";
+import { ATTACHMENT_LIMITS, type Attachment, attachmentType, type Project, type T3, type WorkspaceStrategy } from "../t3.ts";
 import { threadPrompt } from "./prompts.ts";
 import type { Skill } from "./skills.ts";
 
@@ -206,28 +207,65 @@ export class ConversationTools {
   }
 
   /**
+   * A project's existing worktrees (not its main checkout), for reusing one instead of making a
+   * new one: branch, uncommitted changes, last commit, and the active threads working in it.
+   */
+  listWorktrees(input: { project: string }) {
+    return this.record("list_worktrees", input, async () => {
+      const project = await this.allowedProject(input.project);
+      const [worktrees, usedBy] = await Promise.all([gitWorktrees(project.workspaceRoot), this.activeWorktreeUsers(project)]);
+      return Promise.all(
+        worktrees.map(async ({ path, branch }) => {
+          const [changes, lastCommitAt] = await Promise.all([
+            // null when git couldn't tell in time. Edits to tracked files only: scanning for untracked files can take minutes on a big
+            // checkout, and filesystems without Unix modes (exFAT) make every file look modified.
+            git(path, "-c", "core.fileMode=false", "status", "--porcelain", "--untracked-files=no").then(
+              (out) => out.split("\n").filter(Boolean).length,
+              () => null,
+            ),
+            git(path, "log", "-1", "--format=%cI").catch(() => null),
+          ]);
+          return { path, branch, uncommittedChanges: changes, lastCommitAt, activeThreads: usedBy.get(await real(path)) ?? [] };
+        }),
+      );
+    });
+  }
+
+  /**
    * Starts a T3 thread for this conversation with the agent's `prompt`, written from the
    * conversation. Without one (fixed rules), the `request` (by default the latest message) goes in
    * word for word with the conversation fenced off as untrusted. Its answer will come back as an event.
    */
-  startThread(input: { project: string; title: string; prompt?: string; request?: string; label?: string; worktree?: boolean }) {
+  startThread(input: {
+    project: string;
+    title: string;
+    prompt?: string;
+    request?: string;
+    label?: string;
+    worktree?: boolean;
+    worktreePath?: string;
+  }) {
     return this.record("start_thread", input, async () => {
       if (this.launches >= LIMITS.launches) throw new Error(`At most ${LIMITS.launches} threads per run.`);
-      const projects = await this.allowedProjects();
-      const project = projects.find((p) => p.title.toLowerCase() === input.project.toLowerCase());
-      if (!project) throw new Error(`"${input.project}" isn't allowed here. Allowed: ${projects.map((p) => p.title).join(", ") || "none"}.`);
+      if (input.worktree && input.worktreePath) throw new Error("Pass worktree (a new one) or worktreePath (an existing one), not both.");
+      const project = await this.allowedProject(input.project);
 
       const { store, conversation, dispatcher } = this.ctx;
       const label = input.label ?? (store.threads(conversation.id).length === 0 ? "main" : slug(project.title));
       const preparation = await this.prepare();
-      // The gateway's worktree wins; otherwise one on request, else the checkout.
-      const worktree = preparation.worktree
+      // The gateway's worktree wins; otherwise a new or existing one on request, else the checkout.
+      const fromGateway = preparation.worktree
         ? preparation.worktree.branch && label !== "main"
           ? { ...preparation.worktree, branch: `${preparation.worktree.branch}-${slug(label)}` }
           : preparation.worktree
-        : input.worktree
-          ? await newWorktree(project.workspaceRoot, `t3c/${slug(input.title).slice(0, 40)}-${conversation.id.slice(0, 6)}`)
-          : undefined;
+        : undefined;
+      const workspace: WorkspaceStrategy | undefined = fromGateway
+        ? { type: "worktree", ...fromGateway }
+        : input.worktreePath
+          ? { type: "existing_worktree", worktreePath: await this.existingWorktree(project, input.worktreePath) }
+          : input.worktree
+            ? { type: "worktree", ...(await newWorktree(project.workspaceRoot, `t3c/${slug(input.title).slice(0, 40)}-${conversation.id.slice(0, 6)}`)) }
+            : undefined;
 
       const sentAt = new Date().toISOString();
       // Everything shared in the conversation so far, newest kept when there are too many.
@@ -239,7 +277,7 @@ export class ConversationTools {
         prompt: input.prompt
           ? threadPrompt(input.prompt, { instructions: preparation.instructions })
           : threadPrompt(input.request ?? this.latestInbound().text, preparation),
-        worktree,
+        workspace,
         attachments: await this.download(files.slice(-ATTACHMENT_LIMITS.perMessage)),
       });
       if (result.status === "in_progress") throw new Error(`Thread "${label}" is still starting.`);
@@ -381,6 +419,41 @@ export class ConversationTools {
     return thread;
   }
 
+  private async allowedProject(name: string): Promise<Project> {
+    const projects = await this.allowedProjects();
+    const project = projects.find((p) => p.title.toLowerCase() === name.toLowerCase());
+    if (!project) throw new Error(`"${name}" isn't allowed here. Allowed: ${projects.map((p) => p.title).join(", ") || "none"}.`);
+    return project;
+  }
+
+  /** `path` if it's one of the project's worktrees (not its main checkout), as git reports it. */
+  private async existingWorktree(project: Project, path: string): Promise<string> {
+    const wanted = await real(path);
+    for (const worktree of await gitWorktrees(project.workspaceRoot)) {
+      if ((await real(worktree.path)) === wanted) return worktree.path;
+    }
+    throw new Error(`${path} isn't one of ${project.title}'s worktrees. Use a path from list_worktrees.`);
+  }
+
+  /** Titles of the project's active threads, by the worktree each works in. */
+  private async activeWorktreeUsers(project: Project): Promise<Map<string, string[]>> {
+    const users = new Map<string, string[]>();
+    try {
+      const threads = await this.ctx.t3.listThreads(project.id, { settled: false });
+      await Promise.all(
+        threads.map(async (t) => {
+          const path = await this.ctx.t3.threadWorktree(t.threadId);
+          if (!path) return;
+          const key = await real(path);
+          users.set(key, [...(users.get(key) ?? []), t.title]);
+        }),
+      );
+    } catch (error) {
+      log("agent", `couldn't check which threads use ${project.title}'s worktrees: ${errorMessage(error)}`, "warn");
+    }
+    return users;
+  }
+
   /** The newest incoming message: the request being worked on, and the gateway details for it. */
   private latestInbound(): InboundMessage {
     const latest = this.ctx.store
@@ -447,17 +520,43 @@ function describeThread(t: ThreadRecord) {
 
 /** A fresh worktree on `branch`, from the latest default branch on origin (or the current one). */
 async function newWorktree(root: string, branch: string): Promise<Worktree> {
-  const git = async (...args: string[]) => (await promisify(execFile)("git", ["-C", root, ...args])).stdout.trim();
   try {
-    return { baseRef: (await git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")).replace(/^origin\//, ""), branch, startFromOrigin: true };
+    return { baseRef: (await git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")).replace(/^origin\//, ""), branch, startFromOrigin: true };
   } catch {
     // No origin/HEAD (no remote, or never fetched): branch off what's checked out.
   }
   try {
-    return { baseRef: await git("rev-parse", "--abbrev-ref", "HEAD"), branch };
+    return { baseRef: await git(root, "rev-parse", "--abbrev-ref", "HEAD"), branch };
   } catch {
     throw new Error(`${root} isn't a git repository, so its threads can't get a worktree. Start it without one.`);
   }
+}
+
+/** The linked worktrees of the repository at `root`, without the main checkout or stale entries. */
+async function gitWorktrees(root: string): Promise<{ path: string; branch: string | null }[]> {
+  let out: string;
+  try {
+    out = await git(root, "worktree", "list", "--porcelain");
+  } catch {
+    throw new Error(`${root} isn't a git repository, so it has no worktrees.`);
+  }
+  const entries = out.split(/\n\n+/).map((block) => {
+    const lines = block.split("\n");
+    const field = (name: string) => lines.find((l) => l === name || l.startsWith(`${name} `))?.slice(name.length + 1);
+    return { path: field("worktree"), branch: field("branch")?.replace(/^refs\/heads\//, "") ?? null, stale: field("prunable") !== undefined || field("bare") !== undefined };
+  });
+  // git lists the main checkout first.
+  return entries.slice(1).flatMap(({ path, branch, stale }) => (path && !stale ? [{ path, branch }] : []));
+}
+
+/** Fails after 15s: a cold `git status` on a big checkout on a slow disk can take much longer. */
+async function git(cwd: string, ...args: string[]) {
+  return (await promisify(execFile)("git", ["-C", cwd, ...args], { timeout: 15_000 })).stdout.trim();
+}
+
+/** A path with symlinks resolved, for comparing paths from git and T3. */
+function real(path: string) {
+  return realpath(path).catch(() => path);
 }
 
 function slug(text: string) {

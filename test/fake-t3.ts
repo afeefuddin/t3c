@@ -21,6 +21,8 @@ export class FakeT3 implements T3 {
   state = new Map<string, { status: string; items: number }>();
   settled: string[] = [];
   interrupts: { threadId: string; reason: string }[] = [];
+  /** threadWorktree() answers, per thread id. */
+  worktrees = new Map<string, string>();
 
   async listProjects() {
     return this.projects;
@@ -46,6 +48,9 @@ export class FakeT3 implements T3 {
     this.waits.push({ threadId, since });
     await this.gate;
     return this.answers.shift() ?? { status: "completed", text: `**Done** in ${threadId}` };
+  }
+  async threadWorktree(threadId: string) {
+    return this.worktrees.get(threadId) ?? null;
   }
   async progress(threadId: string) {
     return this.state.get(threadId) ?? { status: "completed", items: 1 };

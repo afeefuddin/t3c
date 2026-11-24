@@ -30,7 +30,7 @@ const request = (overrides: Partial<LaunchRequest> = {}): LaunchRequest => ({
 
 test("launches in the resolved project with a capped runtime mode, then returns the existing thread", async () => {
   const { t3, dispatcher, conversation } = setup();
-  const first = await dispatcher.launch(conversation, request({ worktree: { baseRef: "main", branch: "fix-login" } }));
+  const first = await dispatcher.launch(conversation, request({ workspace: { type: "worktree", baseRef: "main", branch: "fix-login" } }));
   assert.equal(first.status, "launched");
   assert.equal(first.thread.t3ThreadId, "t1");
   assert.deepEqual(t3.launches[0], {

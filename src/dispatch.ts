@@ -1,6 +1,5 @@
-import type { Worktree } from "./gateway.ts";
 import type { Conversation, Store, ThreadRecord } from "./store.ts";
-import type { Attachment, Project, RuntimeMode, T3, ThreadModel } from "./t3.ts";
+import type { Attachment, Project, RuntimeMode, T3, ThreadModel, WorkspaceStrategy } from "./t3.ts";
 
 export interface LaunchRequest {
   /** Unique within the conversation; launching an existing label returns that thread instead. */
@@ -9,7 +8,8 @@ export interface LaunchRequest {
   project: string;
   title: string;
   prompt: string;
-  worktree?: Worktree;
+  /** Where the thread works; the project checkout by default. */
+  workspace?: WorkspaceStrategy;
   attachments?: Attachment[];
 }
 
@@ -54,7 +54,7 @@ export class Dispatcher {
         projectId: project.id,
         title,
         message: request.prompt,
-        workspaceStrategy: request.worktree ? { type: "worktree", ...request.worktree } : { type: "root" },
+        workspaceStrategy: request.workspace ?? { type: "root" },
         runtimeMode: this.runtimeMode,
         ...(request.attachments?.length && { attachments: request.attachments }),
         ...(this.model && { modelSelection: { instanceId: this.model.provider, model: this.model.model } }),

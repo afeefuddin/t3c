@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeReply, threadPrompt } from "../src/agent/prompts.ts";
@@ -250,6 +250,42 @@ test("start_thread runs in its own worktree when asked, from the default branch,
   t3.projects[1].workspaceRoot = mkdtempSync(join(tmpdir(), "t3c-plain-"));
   await assert.rejects(run.startThread({ project: "Web", title: "x", worktree: true, label: "w" }), /isn't a git repository/);
   assert.equal(t3.launches.length, 2);
+});
+
+test("list_worktrees shows reusable worktrees; start_thread binds one by path, and only the project's own", async () => {
+  const { t3, gateway, tools } = setup(["*"]);
+  gateway.preparation = {};
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { stdio: "pipe" });
+  const repo = mkdtempSync(join(tmpdir(), "t3c-repo-"));
+  git(repo, "init", "-q", "-b", "main");
+  writeFileSync(join(repo, "notes.txt"), "saved");
+  git(repo, "add", "notes.txt");
+  git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init");
+  const trees = mkdtempSync(join(tmpdir(), "t3c-trees-"));
+  const [idle, busy, dirty] = ["idle", "busy", "dirty"].map((name) => join(trees, name));
+  for (const [path, branch] of [[idle, "old-fix"], [busy, "live"], [dirty, "wip"]]) git(repo, "worktree", "add", "-q", "-b", branch, path);
+  writeFileSync(join(dirty, "notes.txt"), "unsaved"); // an edit counts; an untracked file doesn't
+  writeFileSync(join(dirty, "scratch.txt"), "new");
+  t3.projects[0].workspaceRoot = repo;
+  t3.threads.push({ threadId: "busy-thread", title: "Live work", status: "running", createdAt: new Date().toISOString() });
+  t3.worktrees.set("busy-thread", busy);
+
+  const run = tools();
+  const listed = await run.listWorktrees({ project: "Demo" });
+  const byBranch = new Map(listed.map((w) => [w.branch, w]));
+  assert.deepEqual([...byBranch.keys()].sort(), ["live", "old-fix", "wip"]); // not the main checkout
+  assert.deepEqual(byBranch.get("live")!.activeThreads, ["Live work"]);
+  assert.equal(byBranch.get("wip")!.uncommittedChanges, 1);
+  assert.deepEqual([byBranch.get("old-fix")!.activeThreads, byBranch.get("old-fix")!.uncommittedChanges], [[], 0]);
+
+  await run.startThread({ project: "Demo", title: "Remove warning", worktreePath: byBranch.get("old-fix")!.path, label: "w" });
+  assert.deepEqual(t3.launches[0].workspaceStrategy, { type: "existing_worktree", worktreePath: byBranch.get("old-fix")!.path });
+
+  // The main checkout, another directory, or both options: refused, nothing launched.
+  await assert.rejects(run.startThread({ project: "Demo", title: "x", worktreePath: repo, label: "a" }), /isn't one of Demo's worktrees/);
+  await assert.rejects(run.startThread({ project: "Demo", title: "x", worktreePath: tmpdir(), label: "b" }), /isn't one of Demo's worktrees/);
+  await assert.rejects(run.startThread({ project: "Demo", title: "x", worktree: true, worktreePath: idle, label: "c" }), /not both/);
+  assert.equal(t3.launches.length, 1);
 });
 
 test("reply hands back messages that arrived during the run instead of posting, once; they're the run's from then on", async () => {

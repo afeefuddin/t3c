@@ -113,9 +113,19 @@ function buildServer(tools: ConversationTools, skills: Skill[]) {
       worktree: z
         .boolean()
         .optional()
-        .describe("Run it in its own git worktree on a new branch, from the latest default branch. Only when the request asks for a worktree or a separate branch."),
+        .describe("Run it in a new git worktree on a new branch, from the latest default branch. Only when the request asks for a new worktree or a separate branch."),
+      worktreePath: z
+        .string()
+        .optional()
+        .describe("Run it in this existing worktree, a path from list_worktrees that you chose. Only when the request asks to reuse a worktree."),
     },
     (i) => tools.startThread(i),
+  );
+  add(
+    "list_worktrees",
+    "A project's existing git worktrees (not its main checkout): branch, uncommitted edits to tracked files (null: couldn't check), last commit, and the active threads working in each. For choosing one to reuse with start_thread's worktreePath.",
+    { project: z.string().describe("Project name from list_projects") },
+    (i) => tools.listWorktrees(i),
   );
   add(
     "send_to_thread",

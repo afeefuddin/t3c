@@ -20,7 +20,8 @@ export interface ThreadSummary {
 
 export type WorkspaceStrategy =
   | { type: "root" }
-  | { type: "worktree"; baseRef: string; branch?: string; startFromOrigin?: boolean };
+  | { type: "worktree"; baseRef: string; branch?: string; startFromOrigin?: boolean }
+  | { type: "existing_worktree"; worktreePath: string };
 
 export const RUNTIME_MODES = ["approval-required", "auto-accept-edits", "auto", "full-access"] as const;
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
@@ -64,6 +65,8 @@ export interface T3 {
   listThreads(projectId: string, filter: { titleContains?: string; settled?: boolean }): Promise<ThreadSummary[]>;
   launchThread(input: LaunchInput): Promise<{ threadId: string }>;
   sendToThread(threadId: string, message: string, attachments?: Attachment[]): Promise<void>;
+  /** The worktree the thread is bound to; null when it works in the project checkout. */
+  threadWorktree(threadId: string): Promise<string | null>;
   /** Status and the latest messages (the task, its answers and updates), oldest first. */
   recentMessages(threadId: string): Promise<{ status: string; messages: { type: string; text: string | null }[] }>;
   /** Waits for a run that finished after `since` (ISO time) and returns its final answer. */
@@ -87,7 +90,7 @@ export interface ThreadReply {
 
 interface ThreadState {
   /** `pendingRequestCount`: questions or approvals the thread is blocked on. */
-  thread: { status: string; latestRunId: string | null; itemCount: number; pendingRequestCount?: number };
+  thread: { status: string; latestRunId: string | null; itemCount: number; pendingRequestCount?: number; worktreePath?: string | null };
   recentRuns: { runId: string; completedAt: string | null }[];
   items: { type: string; runId: string | null; text: string | null }[];
 }
@@ -210,6 +213,11 @@ export class T3Client implements T3 {
   async progress(threadId: string) {
     const { thread } = await this.call<ThreadState>("t3_thread_read", { threadId, limit: 1, maxCharsPerItem: 1 });
     return { status: thread.status, items: thread.itemCount };
+  }
+
+  async threadWorktree(threadId: string) {
+    const { thread } = await this.call<ThreadState>("t3_thread_read", { threadId, limit: 1, maxCharsPerItem: 1 });
+    return thread.worktreePath ?? null;
   }
 
   async settleThread(threadId: string) {

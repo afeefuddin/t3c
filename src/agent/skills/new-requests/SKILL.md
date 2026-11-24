@@ -24,7 +24,12 @@ description: Starts work on a new request: picks the project, starts a T3 thread
    tasks; use your judgment about whether they belong together. For new work, `start_thread` with a
    short title (what will change, under 60 characters) and a prompt (load
    the `write-thread-prompt` skill). If the request asks for a new worktree or a separate branch
-   ("do it in a worktree", "naye branch pe"), add `worktree: true`; otherwise leave it out.
+   ("do it in a worktree", "naye branch pe"), add `worktree: true`. If it asks to reuse an
+   existing worktree ("use one of our worktrees", "the unused one"), choose it yourself: call
+   `list_worktrees`, pick one with no active threads and 0 uncommitted changes (null means
+   unknown; the oldest last commit when several fit), and pass its path as `worktreePath`. Name
+   it in the prompt and the reply. Never leave choosing a worktree to the thread. If none is free, say so and use
+   `worktree: true` instead. Otherwise leave both out.
 4. `reply` with one short line showing what you took on ("On it, checking the chip contrast 👀"),
    plus any assumption.
 
