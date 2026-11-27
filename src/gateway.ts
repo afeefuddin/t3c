@@ -86,6 +86,11 @@ export interface Gateway {
    * machine was asleep). Must return each message under the same eventKey a webhook would use.
    */
   catchUp?(): Promise<InboundMessage[]>;
+  /**
+   * Opens a connection that brings messages in without webhooks (Slack's Socket Mode), and keeps
+   * it open until the returned function is called. Messages go through `deliver` like webhooks.
+   */
+  listen?(deliver: (message: InboundMessage) => void): () => void;
 }
 
 export class GatewayError extends Error {

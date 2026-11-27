@@ -37,7 +37,7 @@ export async function serve() {
   if (config.slack) {
     const slack = new SlackGateway(config.slack, { store, projects: savedProjects("slack") });
     // Slack being unreachable or slow (offline, an outage) mustn't hold up or take down terminal chat
-    // and Instinct: webhooks get a 503 until it connects, and catch-up recovers what was sent meanwhile.
+    // and Instinct: webhooks get a 503 (and Socket Mode keeps retrying) until it connects, and catch-up recovers what was sent meanwhile.
     void slack.init().catch((e) => log("slack", `can't reach Slack yet (${errorMessage(e)}); retrying in the background`, "warn"));
     gateways.push(slack);
   }
@@ -72,6 +72,8 @@ export async function serve() {
   // Webhooks get lost sometimes, and none arrive while this machine sleeps.
   void worker.catchUp();
   const catchUp = setInterval(() => void worker.catchUp(), CATCH_UP_INTERVAL_MS);
+  // Gateways with their own connection (Slack's Socket Mode) bring messages in without webhooks.
+  const unlisten = gateways.map((g) => g.listen?.((message) => void worker.enqueue(message)));
   // Checks running threads for ones that are stuck.
   const supervise = setInterval(() => void worker.supervise(), SUPERVISE_INTERVAL_MS);
 
@@ -105,6 +107,7 @@ export async function serve() {
     log("t3c", `${signal}: stopping`);
     clearInterval(catchUp);
     clearInterval(supervise);
+    for (const stopListening of unlisten) stopListening?.();
     await worker.stop(SHUTDOWN_GRACE_MS);
     server.close();
     await t3.close().catch(() => {});

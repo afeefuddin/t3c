@@ -9,7 +9,6 @@ import { loadConfig, paths, saveConfig, VERSION } from "./config.ts";
 import { logs, runningPid, start, status, stop } from "./daemon.ts";
 import { Dispatcher } from "./dispatch.ts";
 import { color, errorMessage, preview } from "./log.ts";
-import { funnelProblem } from "./tailscale.ts";
 import { Store } from "./store.ts";
 import type { RuntimeMode } from "./t3.ts";
 import { confirm, say } from "./ui.ts";
@@ -236,12 +235,13 @@ async function setup() {
   await (await setupCommands()).addSlack(); // ends by starting (or restarting) t3c
 }
 
-/** Everything setup needs that isn't there, all at once, so nothing stops it halfway. */
+/**
+ * Everything setup needs that isn't there, all at once, so nothing stops it halfway. Tailscale isn't
+ * among them: without Funnel, Slack connects over Socket Mode.
+ */
 async function missingPrerequisites(): Promise<string[]> {
   const missing: string[] = [];
   if (!isLoggedIn(paths.auth) && !commandExists("t3")) missing.push("The `t3` command (T3 Code's CLI) wasn't found. Install it and make sure T3 Code is running.");
-  const funnel = await funnelProblem();
-  if (funnel) missing.push(`Slack reaches this machine through Tailscale Funnel. ${funnel}`);
   return missing;
 }
 

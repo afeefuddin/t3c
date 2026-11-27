@@ -15,8 +15,11 @@ export interface Config {
   /** Model for the threads t3c starts; the project's default in T3 when unset. */
   model?: ThreadModel;
   slack?: {
-    signingSecret: string;
     botToken: string;
+    /** Socket Mode's app-level token (xapp-…): t3c connects out to Slack, so no public URL is needed. */
+    appToken?: string;
+    /** Verifies webhooks from Slack's Events API; unused with Socket Mode. */
+    signingSecret?: string;
     /** T3 project ids (titles in older configs) the bot may work in, from any channel or DM; "*" means any. */
     projects: string[];
     /** Slack user ids allowed to use the bot. */
@@ -101,5 +104,10 @@ export function t3McpUrl() {
 
 /** Gateways that need remote callers to reach this machine through Funnel. */
 export function needsFunnel(config: Config) {
-  return Boolean(config.slack || config.http?.public);
+  return Boolean(slackWebhooks(config) || config.http?.public);
+}
+
+/** Slack delivers events as webhooks to this machine, rather than over Socket Mode. */
+export function slackWebhooks(config: Config) {
+  return Boolean(config.slack && !config.slack.appToken);
 }

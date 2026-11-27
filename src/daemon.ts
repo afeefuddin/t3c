@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isLoggedIn, t3Auth } from "./auth.ts";
-import { allowedProjects, type Config, home, loadConfig, needsFunnel, paths, t3McpUrl } from "./config.ts";
+import { allowedProjects, type Config, home, loadConfig, needsFunnel, paths, slackWebhooks, t3McpUrl } from "./config.ts";
 import { PROBE_USER_AGENT } from "./gateway.ts";
 import { slackApi } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
@@ -79,7 +79,7 @@ export async function start(entry: string) {
       say.ok(`Tailscale Funnel: ${await enableFunnel(config.port)} (only /hooks is public)`);
     } catch (error) {
       // t3c still runs: terminal chat works, and Slack messages sent meanwhile are caught up on later.
-      say.warn(`t3c is running, but Slack and Instinct can't reach it: Tailscale Funnel didn't turn on (${errorMessage(error)}).`);
+      say.warn(`t3c is running, but ${slackWebhooks(config) ? "Slack and Instinct" : "Instinct"} can't reach it: Tailscale Funnel didn't turn on (${errorMessage(error)}).`);
       say.hint("Once Tailscale is connected, run `t3c restart`. Slack messages sent meanwhile are picked up then.");
       process.exitCode = 1;
     }
@@ -139,7 +139,7 @@ export async function status() {
     const slack = config.slack;
     await check("Slack", async () => {
       const auth = await slackApi(slack.botToken)("auth.test");
-      return `${auth.team} as @${auth.user}`;
+      return `${auth.team} as @${auth.user}, ${slack.appToken ? "over Socket Mode" : "by webhooks"}`;
     });
   }
   if (needsFunnel(config)) {
@@ -150,7 +150,7 @@ export async function status() {
     if (base && pid) {
       // An unsigned request must reach t3c through Funnel and be refused by it.
       let gateway = "http";
-      if (config.slack) gateway = "slack";
+      if (slackWebhooks(config)) gateway = "slack";
       const hook = `${base}/hooks/${gateway}`;
       await check(`Public URL ${base}/hooks`, async () => {
         const response = await fetch(hook, { method: "POST", headers: { "user-agent": PROBE_USER_AGENT }, signal: AbortSignal.timeout(10_000) });

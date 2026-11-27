@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, writeFileSync } from "node:fs";
-import { loadConfig, needsFunnel, paths, saveConfig } from "./config.ts";
+import { type Config, loadConfig, needsFunnel, paths, saveConfig } from "./config.ts";
 import { findSlackUsers, SLACK_BOT_SCOPES, slackApi, slackAppInfo, slackManifest, slackNewAppUrl } from "./gateways/slack.ts";
 import { errorMessage } from "./log.ts";
 import { isLoggedIn, t3Auth } from "./auth.ts";
@@ -23,13 +23,22 @@ export async function addSlack() {
   let slack = previous;
 
   if (slack && !(await confirm("Slack is already connected. Connect a different Slack app instead?", false))) {
-    await updateSlackApp(slack.botToken);
+    await updateSlackApp(slack);
   } else {
-    const manifest = slackManifest(await publicUrl());
+    // Socket Mode needs no public URL; webhooks need Tailscale Funnel.
+    const funnel = await funnelProblem();
+    const socket = funnel
+      ? true
+      : await choose("How should Slack reach t3c?", [
+          { label: "Socket Mode: t3c connects out to Slack, nothing on this machine is public (recommended)", value: true },
+          { label: "Webhooks: Slack posts to this machine through Tailscale Funnel", value: false },
+        ]);
+    if (funnel) say.hint("Using Socket Mode: t3c connects out to Slack, so Tailscale Funnel isn't needed.");
+    const manifest = slackManifest(socket ? undefined : await publicUrl());
     say.step("1. Create the Slack app");
     say.info("Opening Slack with the app's settings filled in. Pick your workspace → Next → Create,");
     say.info("then Install to Workspace → Allow.");
-    const stopAnswering = await answerSlackUrlCheck(config.port);
+    const stopAnswering = socket ? async () => {} : await answerSlackUrlCheck(config.port);
     openUrl(slackNewAppUrl(manifest));
     try {
       await ask("Press Enter once it's installed", { default: "done" });
@@ -55,13 +64,31 @@ export async function addSlack() {
     say.ok(`Connected to ${team}.`);
     const { appId } = await slackAppInfo(botToken).catch(() => ({ appId: undefined }));
     if (appId) openUrl(`https://api.slack.com/apps/${appId}`);
-    say.hint(`${appId ? "Opened the app's settings: " : "On the app's page: "}Basic Information → App Credentials → Signing Secret → Show → copy`);
-    const signingSecret = await ask("Signing secret", {
-      hidden: true,
-      validate: (s) => (/^[0-9a-f]{32}$/.test(s) ? undefined : "That doesn't look like a signing secret (32 hex characters)."),
-    });
-    slack = { botToken, signingSecret, projects: previous?.projects ?? ["*"], allowedUsers: previous?.allowedUsers ?? [] };
+    const page = appId ? "Opened the app's settings: " : "On the app's page: ";
+    slack = { botToken, projects: previous?.projects ?? ["*"], allowedUsers: previous?.allowedUsers ?? [] };
+    if (socket) {
+      say.hint(`${page}Basic Information → App-Level Tokens → Generate Token and Scopes → name it t3c, Add Scope connections:write → Generate → Copy`);
+      slack.appToken = await ask("App-level token (xapp-…)", {
+        hidden: true,
+        validate: async (token) => {
+          if (!token.startsWith("xapp-")) return "App-level tokens start with xapp-.";
+          try {
+            await slackApi(token)("apps.connections.open");
+          } catch (error) {
+            return `Slack rejected it: ${errorMessage(error)}`;
+          }
+        },
+      });
+    } else {
+      say.hint(`${page}Basic Information → App Credentials → Signing Secret → Show → copy`);
+      slack.signingSecret = await ask("Signing secret", {
+        hidden: true,
+        validate: (s) => (/^[0-9a-f]{32}$/.test(s) ? undefined : "That doesn't look like a signing secret (32 hex characters)."),
+      });
+    }
     saveConfig({ ...config, slack });
+    // Switched from webhooks to Socket Mode: nothing needs to be public any more.
+    if (needsFunnel(config) && !needsFunnel(loadConfig())) await disableFunnel().catch(() => {});
   }
 
   const api = slackApi(slack.botToken);
@@ -91,13 +118,13 @@ export async function addSlack() {
 }
 
 /** Checks a connected app has every scope t3c needs, and walks through updating it if not. */
-async function updateSlackApp(botToken: string) {
+async function updateSlackApp({ botToken, appToken }: NonNullable<Config["slack"]>) {
   const { appId, scopes } = await slackAppInfo(botToken);
   const missing = () => SLACK_BOT_SCOPES.filter((s) => !scopes.includes(s));
   if (missing().length === 0) return say.ok("The Slack app is up to date.");
   say.step("Update the Slack app");
   say.warn(`It's missing ${missing().join(", ")}, which DMs and files need.`);
-  const manifest = JSON.stringify(slackManifest(await publicUrl()), null, 2);
+  const manifest = JSON.stringify(slackManifest(appToken ? undefined : await publicUrl()), null, 2);
   if (copy(manifest)) say.ok("Copied the current app manifest to your clipboard.");
   else console.log(manifest);
   say.info(`${appId ? "Opening the app's settings" : "Open your app at api.slack.com/apps"}: App Manifest → replace it with this one (JSON tab) → Save → Reinstall to Workspace → Allow.`);

@@ -7,8 +7,8 @@ Instinct, or HTTP webhooks. t3c runs on the same machine as T3 Code.
 
 - macOS or Linux, Git, and Node.js 24+.
 - T3 Code running with a coding provider configured and the `t3` CLI on your PATH.
-- [Tailscale](https://tailscale.com/download), signed in, with
-  [Funnel enabled](https://tailscale.com/kb/1223/funnel) for Slack or Instinct.
+- For Instinct, or Slack by webhooks: [Tailscale](https://tailscale.com/download), signed in, with
+  [Funnel enabled](https://tailscale.com/kb/1223/funnel). Slack over Socket Mode needs neither.
 
 ## Install
 
@@ -27,9 +27,12 @@ Keep this folder: the installed command runs from it.
 t3c setup
 ```
 
-Follow the prompts to create a Slack app, enter its bot token and signing secret,
-choose allowed people and projects, and start t3c. You need permission to install
-apps in your Slack workspace.
+Follow the prompts to create a Slack app, enter its tokens, choose allowed people and
+projects, and start t3c. You need permission to install apps in your Slack workspace.
+
+Slack can reach t3c in two ways. With Socket Mode (recommended), t3c connects out to Slack
+with an app-level token, so nothing on this machine is public. With webhooks, Slack posts to
+this machine through Tailscale Funnel, verified with the app's signing secret.
 
 Invite your bot to a channel and mention it with a task, or send it a DM.
 Replies in the same Slack thread continue the task; answers are posted back there.

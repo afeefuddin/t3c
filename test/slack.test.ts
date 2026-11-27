@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
+import type { InboundMessage } from "../src/gateway.ts";
 import { findSlackUsers, render, type SlackEvent, SlackGateway, slackChallenge, slackManifest, slackNewAppUrl, toSlackMarkdown } from "../src/gateways/slack.ts";
 import { Store } from "../src/store.ts";
 
 const BOT = "UBOT";
 const SECRET = "slack-signing-secret";
 
-async function setup({ projects = ["demo"], member = ["C1", "C2", "D1"] } = {}) {
+async function setup({ projects = ["demo"], member = ["C1", "C2", "D1"], unreadable = [] as string[] } = {}) {
   const store = new Store(":memory:");
   const calls: { method: string; args: Record<string, string> }[] = [];
   const history: SlackEvent[] = [];
@@ -15,7 +16,10 @@ async function setup({ projects = ["demo"], member = ["C1", "C2", "D1"] } = {}) 
     calls.push({ method, args });
     if (method === "auth.test") return { user_id: BOT };
     if (method === "users.conversations") return { channels: member.map((id) => ({ id })) };
-    if (method === "conversations.replies") return { messages: history.filter((m) => (m.thread_ts ?? m.ts) === args.ts) };
+    if (method === "conversations.replies") {
+      if (unreadable.includes(args.channel)) throw new Error("Slack conversations.replies failed: not_in_channel");
+      return { messages: history.filter((m) => m.channel === args.channel && (m.thread_ts ?? m.ts) === args.ts) };
+    }
     if (method === "conversations.history") {
       // Top-level messages (and thread broadcasts) in the channel after `oldest`, newest first.
       const after = history.filter((m) => m.channel === args.channel && Number(m.ts) > Number(args.oldest));
@@ -215,6 +219,157 @@ test("the manifest points Slack at this machine's hook and lets people DM the bo
   assert.equal(manifest.settings.socket_mode_enabled, false);
 });
 
+test("without a public URL, the manifest has Slack deliver events over Socket Mode", () => {
+  const manifest = slackManifest();
+  assert.equal(manifest.settings.socket_mode_enabled, true);
+  assert.equal("request_url" in manifest.settings.event_subscriptions, false);
+  assert.ok(manifest.settings.event_subscriptions.bot_events.includes("app_mention"));
+});
+
+/** A WebSocket as far as Socket Mode uses one; `close` reports at once, like a dropped connection. */
+class FakeSocket extends EventTarget {
+  sent: unknown[] = [];
+  closed = false;
+  send(data: string) {
+    this.sent.push(JSON.parse(data));
+  }
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.dispatchEvent(new Event("close"));
+  }
+  /** Slack sending an envelope. */
+  receive(envelope: unknown) {
+    this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(envelope) }));
+  }
+}
+
+async function socketSetup(open: () => Promise<string>) {
+  const sockets: FakeSocket[] = [];
+  const slack = async (method: string) => (method === "auth.test" ? { user_id: BOT } : {});
+  const gateway = new SlackGateway(
+    { appToken: "xapp", botToken: "xoxb", projects: ["demo"], allowedUsers: ["UALICE"] },
+    {
+      store: new Store(":memory:"),
+      slack,
+      openSocket: open,
+      connectSocket: (url) => {
+        new URL(url); // throws for a bad URL, as WebSocket does
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+    },
+  );
+  const delivered: InboundMessage[] = [];
+  const stop = gateway.listen((m) => delivered.push(m));
+  return { gateway, sockets, delivered, stop };
+}
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+const mentionEnvelope = (id: string, ts: string) => ({
+  type: "events_api",
+  envelope_id: id,
+  payload: { type: "event_callback", event_id: `Ev${id}`, event: { type: "app_mention", channel: "C1", ts, user: "UALICE", text: `<@${BOT}> fix it` } },
+});
+
+test("Socket Mode: events are acknowledged at once and become messages, with no webhooks", async () => {
+  let opened = 0;
+  const { gateway, sockets, delivered, stop } = await socketSetup(async () => `wss://slack.test/${++opened}`);
+  await flush();
+  assert.equal(sockets.length, 1);
+  const [socket] = sockets;
+  socket.receive({ type: "hello", num_connections: 1 });
+  socket.receive(mentionEnvelope("E1", "100.1"));
+  assert.deepEqual(socket.sent, [{ envelope_id: "E1" }]);
+  await flush();
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].text, "fix it");
+  assert.equal(delivered[0].conversationId, "C1:100.1");
+
+  // Without a signing secret nothing arrives as a webhook, signed or not.
+  assert.throws(() => gateway.receive(signed({ type: "event_callback" })), { status: 404 });
+
+  stop();
+  assert.equal(socket.closed, true);
+});
+
+test("Socket Mode connects again when Slack refreshes the connection, it drops, or opening fails", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let failing = false;
+  let opened = 0;
+  const { sockets, delivered, stop } = await socketSetup(async () => {
+    if (failing) throw new Error("Slack apps.connections.open failed: ratelimited");
+    return `wss://slack.test/${++opened}`;
+  });
+  await flush();
+  sockets[0].receive({ type: "hello" });
+
+  // Slack's routine refresh.
+  sockets[0].receive({ type: "disconnect", reason: "refresh_requested" });
+  assert.equal(sockets[0].closed, true);
+  t.mock.timers.tick(1_000);
+  await flush();
+  assert.equal(sockets.length, 2);
+
+  // A dropped connection, then Slack refusing for a while: retried with growing pauses.
+  sockets[1].receive({ type: "hello" });
+  failing = true;
+  sockets[1].close();
+  t.mock.timers.tick(1_000);
+  await flush();
+  t.mock.timers.tick(1_000);
+  await flush();
+  assert.equal(sockets.length, 2);
+  failing = false;
+  t.mock.timers.tick(5_000);
+  await flush();
+  assert.equal(sockets.length, 3);
+
+  sockets[2].receive({ type: "hello" });
+  sockets[2].receive(mentionEnvelope("E2", "200.1"));
+  await flush();
+  assert.equal(delivered.length, 1);
+
+  stop();
+  t.mock.timers.tick(60_000);
+  await flush();
+  assert.equal(sockets.length, 3);
+  assert.ok(sockets.every((s) => s.closed));
+});
+
+test("Socket Mode turned off in the app is retried only now and then, and nothing about a bad connection stops t3c", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let opened = 0;
+  let url = "wss://slack.test";
+  const { sockets, stop } = await socketSetup(async () => {
+    opened++;
+    return url;
+  });
+  await flush();
+  sockets[0].receive({ type: "hello" });
+  sockets[0].receive({ type: "disconnect", reason: "link_disabled" });
+  t.mock.timers.tick(59_000);
+  await flush();
+  assert.equal(opened, 1);
+  t.mock.timers.tick(1_000);
+  await flush();
+  assert.equal(opened, 2);
+
+  // Writing to a connection that's closing throws; so does connecting to a URL that isn't one.
+  const closing = sockets[1];
+  closing.send = () => {
+    throw new Error("InvalidStateError");
+  };
+  closing.receive(mentionEnvelope("E3", "300.1"));
+  url = "not a url";
+  closing.receive({ type: "disconnect", reason: "refresh_requested" });
+  t.mock.timers.tick(1_000);
+  await flush();
+  assert.equal(opened, 3);
+  stop();
+});
+
 test("converts common Markdown to Slack mrkdwn", () => {
   assert.equal(toSlackMarkdown("## Fixed\n**bold** and [PR](https://x.y/1)"), "*Fixed*\n*bold* and <https://x.y/1|PR>");
 });
@@ -352,6 +507,57 @@ test("prepare includes everything in the earlier thread, files too", async () =>
   const prepared = await gateway.prepare(message!);
   assert.equal(prepared.context, "a bot: > Deploy failed\n@UBOB: here\n[file: shot.png (image/png)]");
   assert.deepEqual(prepared.files?.map((f) => f.name), ["shot.png"]);
+});
+
+test("a forwarded message brings its whole thread, read where it was posted, files too", async () => {
+  const { gateway, history, store } = await setup();
+  history.push(
+    { type: "message", channel: "C2", ts: "50.0", user: "UBOB", text: "checkout times out" },
+    { type: "message", channel: "C2", ts: "51.0", thread_ts: "50.0", user: "UCAROL", text: "only for EU cards", files: [shot] },
+  );
+  // Forwarding Carol's reply into a DM: Slack attaches it with where it was posted.
+  const forward = {
+    is_share: true,
+    channel_id: "C2",
+    ts: "51.0",
+    from_url: "https://acme.slack.com/archives/C2/p0000000051000000?thread_ts=50.0&cid=C2",
+    text: "only for EU cards",
+  };
+  const message = gateway.receive(eventCallback({ type: "message", channel: "D1", text: "fix this", attachments: [forward] })).message!;
+  assert.equal(message.text, "fix this\n> only for EU cards");
+  const prepared = await gateway.prepare(message);
+  assert.equal(
+    prepared.context,
+    `Thread the forwarded or linked message ${forward.from_url} is in:\n@UBOB: checkout times out\n@UCAROL: only for EU cards\n[file: shot.png (image/png)]`,
+  );
+  assert.deepEqual(prepared.files?.map((f) => f.name), ["shot.png"]);
+
+  // A follow-up in the DM thread still sees the forwarded thread, from the earlier message.
+  store.enqueue(message);
+  history.push({ type: "message", channel: "D1", ts: "100.1", user: "UALICE", text: "fix this", attachments: [forward] });
+  const followUp = gateway.receive(eventCallback({ type: "message", channel: "D1", ts: "100.2", thread_ts: "100.1", text: "and add a test" }, "Ev2")).message!;
+  assert.match((await gateway.prepare(followUp)).context!, /Thread the forwarded.*\n@UBOB: checkout times out\n@UCAROL: only for EU cards/);
+});
+
+test("a pasted message link brings its thread; one t3c can't read is explained, not dropped", async () => {
+  const { gateway, history } = await setup({ unreadable: ["CSECRET"] });
+  history.push({ type: "message", channel: "C2", ts: "1700000000.123456", user: "UBOB", text: "the flaky test" });
+  const text = `<@${BOT}> see <https://acme.slack.com/archives/C2/p1700000000123456> and <https://acme.slack.com/archives/CSECRET/p1700000001000000|this>`;
+  const prepared = await gateway.prepare(gateway.receive(eventCallback({ text })).message!);
+  assert.equal(
+    prepared.context,
+    [
+      "Thread the forwarded or linked message https://acme.slack.com/archives/C2/p1700000000123456 is in:\n@UBOB: the flaky test",
+      "Thread the forwarded or linked message https://acme.slack.com/archives/CSECRET/p1700000001000000 is in:\n(couldn't be read: t3c isn't in that channel; invite it there to read the thread)",
+    ].join("\n\n"),
+  );
+});
+
+test("bot cards can't point t3c at other channels", async () => {
+  const { gateway, history, calls } = await setup();
+  history.push({ type: "message", channel: "C1", ts: "90.0", bot_id: "B1", text: "", attachments: [{ is_share: true, channel_id: "C2", ts: "50.0", text: "x" }] });
+  await gateway.prepare(gateway.receive(eventCallback({ thread_ts: "90.0", text: `<@${BOT}> fix this` })).message!);
+  assert.deepEqual(calls.filter((c) => c.method === "conversations.replies").map((c) => c.args.channel), ["C1"]);
 });
 
 test("catch-up recovers a mention under someone else's message, in a thread t3c wasn't following", async () => {
